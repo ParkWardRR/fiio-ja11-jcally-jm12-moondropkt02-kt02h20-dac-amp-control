@@ -52,6 +52,41 @@ bands, gain, presets — **without ever touching flash**.
 > once real hardware is in the loop — see [Phase 0](ROADMAP.md#phase-0--protocol-recovery-) for
 > exactly what's confirmed vs. inferred.
 
+> [!NOTE]
+> **Why not iOS?** Confirmed straight from FIIO's own support docs, not just platform
+> speculation: [*"How to control the JA11 via the FiiO Control APP in Android mobile
+> phone?"*](https://fiiosupport.freshdesk.com/support/solutions/articles/69000869868-how-to-control-the-ja11-via-the-fiio-control-app-in-android-mobile-phone-)
+> states plainly — **"The JA11 could not be controlled via the iOS version FiiO Control APP."**
+> Apple gives third-party apps no general USB-host API (only `ExternalAccessory` for
+> MFi-certified accessories, which this isn't) — the same wall FIIO itself hit. That's why this
+> project targets **macOS + Linux** as native desktop apps instead of iOS.
+
+---
+
+## 🎯 What `ktctl` should replicate
+
+Confirmed against FIIO's own support docs
+([*"How to control the JA11 via the FiiO Control APP in Android mobile phone?"*](https://fiiosupport.freshdesk.com/support/solutions/articles/69000869868-how-to-control-the-ja11-via-the-fiio-control-app-in-android-mobile-phone-),
+screenshots included) — this is the actual, real-device UI `ktctl`'s CLI/TUI is targeting
+feature-parity with:
+
+| Screen | What it shows / does |
+|---|---|
+| **My devices** | Device card: name (`JadeAudio JA11`) + connection status (`connected`). |
+| **EQ** | Live curve graph over a 5-band PEQ (bands seen at `29 / 81 / 600 / 7460 / 15660 Hz`, gains `±12 dB` range), a **master gain** slider (separate from the bands, `0 dB` center), an EQ on/off toggle, `Custom` / `Advanced Settings` / `save` actions. |
+| **Status** | Device name, **firmware version**, **sample rate** (e.g. `384k`), **in-line microphone** detect (on/off), **UAC version** selector (`UAC 1.0` / `UAC 2.0`, tap to switch), **device volume** (tap to open a detail view). |
+| **Guide** | Static help/tutorial content — low priority, not really "control." |
+
+This maps directly onto the opcodes in [ROADMAP.md Phase 0](ROADMAP.md#phase-0--protocol-recovery-):
+EQ screen → `0x15`/`0x16`/`0x17`; Status screen → `0x02`/`0x09`/`0x0B`/`0x12`/`0x20`. The
+screenshots are strong **semantic** corroboration of what each opcode does (the values on
+screen — volume `60`, sample rate `384k`, mic detect `ON`, `UAC 2.0` — line up exactly with
+what the RE predicted), though they don't confirm the **wire bytes** — that still needs
+hardware. One open discrepancy worth tracking: the Status screen's displayed version (`1.4`)
+doesn't match the `V2.2` firmware image analyzed in `ktflash`'s RE — possibly a
+protocol/hardware revision string distinct from the flashable firmware build; needs a real
+device to resolve.
+
 ---
 
 ## 🔍 What's already known (from static RE)
@@ -59,16 +94,20 @@ bands, gain, presets — **without ever touching flash**.
 Recovered from the FiiO Control Android app's Java layer (not its Flutter/Dart layer — the
 JA11-relevant code turned out to be plain, decompilable Java/Kotlin):
 
-- **Transport**: raw USB bulk transfer against a vendor interface (claimed directly via
-  `UsbDeviceConnection`, not the HID class driver, and not the CDC-ACM serial port `ktflash`
-  uses for firmware flashing — this is a *different* interface on the same device).
+- **Transport**: raw USB bulk transfer against the device's **HID-class interface**, claimed
+  directly via `UsbDeviceConnection` (bypassing the OS HID class driver), not the CDC-ACM serial
+  port `ktflash` uses for firmware flashing — a *different* interface on the same device. The
+  interface/endpoints are **descriptor-discovered, not hardcoded**: the first interface with
+  `bInterfaceClass == 3` (HID) and exactly 2 endpoints, OUT/IN picked by direction bit.
 - **Frame format**: `02 <AA|BB> <0A|0B> <seq_hi> <seq_lo> <cmd> <len> <payload…> <crc8> EE` —
   `AA 0A` = write, `BB 0B` = read/query, a 16-bit free-running sequence counter, a
   **CRC-8/MAXIM** (Dallas/Maxim 1-Wire) checksum, and a fixed `0xEE` terminator.
 - **Known opcodes**: `0x15` per-PEQ-band get/set (index, Q ×100, gain ×10 dB, freq Hz, filter
   type), `0x16` PEQ enable / active preset slot, `0x17` global/makeup gain (×10 dB).
-- **Not yet pinned down**: the exact USB interface/endpoint numbers, whether the leading `0x02`
-  is strictly required, and the filter-type enum's exact meaning (peaking / shelf / etc.).
+- **Filter types**: the JA11 supports 3 of FIIO's 7 shared filter types —
+  `0`=Peak, `1`=LowShelf, `2`=HighShelf.
+- **Not yet pinned down**: whether the leading `0x02` byte is strictly required, and the exact
+  byte range the CRC-8 covers — both need a real device or a USB capture to confirm.
 
 Full detail lives in `ktflash`'s
 [`research/android-app-re-findings.md`](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit/blob/main/research/android-app-re-findings.md)

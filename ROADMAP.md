@@ -18,13 +18,14 @@ vendor utility for this particular channel to fall back on).
 
 > ## 📍 You are here
 >
-> **Phase 0 is partially done**: the protocol was recovered by *static* reverse-engineering of
-> the FiiO Control Android app (v3.45.0 and v4.0.0) — see
+> **Phase 0's static RE is now complete**: frame format, opcodes, interface/endpoint discovery,
+> and the filter-type enum are all recovered from the FiiO Control Android app (v3.45.0 and
+> v4.0.0) — see
 > [ktflash's `research/android-app-re-findings.md` §4](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit/blob/main/research/android-app-re-findings.md)
 > for the full write-up this project is built on. **Nothing has been confirmed against real
-> hardware yet, and no code exists in this repo.** The frontier is getting a USB capture (or
-> just trying it against a real JA11) to validate Phase 0 before writing Phase 1's fixtures
-> against possibly-wrong assumptions.
+> hardware yet, and no code exists in this repo.** The frontier is now purely hardware
+> validation — a USB capture, or just trying it against a real JA11 — before writing Phase 1's
+> fixtures against possibly-wrong assumptions.
 
 ---
 
@@ -64,16 +65,29 @@ Phase 5  Packaging + release (binaries, both platforms) ............... ⏳ plan
    | `0x15` | per-band PEQ get/set | `[index, Q×100 (i16 BE), gain×10dB (i16 BE), freq Hz (u16 BE), filterType]` |
    | `0x16` | PEQ enable / active preset slot | `[value]` (0-3 = preset slot, 4 = off — inferred) |
    | `0x17` | global/makeup gain | `[gain×10dB (i16 BE)]` |
-5. ⏳ **Hardware validation** (the actual frontier): confirm the frame format, opcodes, and
-   field encodings against a **real JA11**, ideally via a USB capture (Wireshark + `usbmon` on
-   Linux) of the official Android app doing one PEQ read and one PEQ write. Without this,
-   Phase 1 risks building fixtures around a wrong assumption the same way `ktflash`'s CRC-32
-   scope was initially mis-scoped (payload-only vs. header+payload) before hardware caught it.
-6. ⏳ **Pin down open unknowns**: exact USB interface/endpoint numbers (the decompiled code
-   resolves them from claimed-interface descriptors at runtime, not hardcoded — needs either
-   more decompilation upstream or a capture), whether the leading `0x02` byte is load-bearing
-   or an artifact of one specific code path, and the filter-type enum's real meaning (peaking
-   / low-shelf / high-shelf / etc.).
+
+   Plus, on a **separate frame-builder "channel"** used by the state tab (same wire format,
+   different opcode namespace context — see the RE write-up §4b): `0x02` volume, `0x09`
+   sample-rate/format (indexed into a 15-entry PCM/DSD table), `0x0B` firmware version
+   (`"{major}.{minor}"`), `0x12` in-line mic detect, `0x20` UAC 1.0/2.0 mode (read+write). None
+   of this is PEQ, but it's all reachable the same way and worth exposing from `ktctl` too —
+   see Phase 3.
+5. ✅ **Interface/endpoint discovery resolved**: no hardcoded numbers — the app scans
+   `UsbDevice.getInterface(i)` for the one with `bInterfaceClass == 3` (HID) and exactly 2
+   endpoints, then picks OUT/IN by direction bit, force-claiming it (detaches the kernel HID
+   driver, same class of problem `ktflash` hit on macOS with `IOHIDFamily`). `ktctl` can use
+   the identical heuristic against `rusb`/`nusb` interface descriptors.
+6. ✅ **Filter-type enum resolved**: FIIO's shared PEQ UI defines 7 types (Peak, LowShelf,
+   HighShelf, BandPass, LowPass, HighPass, AllPass), but the **JA11's own band-edit screen
+   only offers 3** — so on a JA11, `filterType` is `0`=Peak, `1`=LowShelf, `2`=HighShelf.
+7. ⏳ **Hardware validation** (the actual frontier — everything else in Phase 0 is now static-
+   complete): confirm the frame format, opcodes, and field encodings against a **real JA11**,
+   ideally via a USB capture (Wireshark + `usbmon` on Linux) of the official Android app doing
+   one PEQ read and one PEQ write. Without this, Phase 1 risks building fixtures around a wrong
+   assumption the same way `ktflash`'s CRC-32 scope was initially mis-scoped (payload-only vs.
+   header+payload) before hardware caught it. Remaining unknowns to settle this way: whether
+   the leading `0x02` byte is load-bearing or an artifact of one specific code path, and the
+   exact byte range the CRC-8 covers.
 
 **This phase's exit criterion**: one real read and one real write against a JA11, byte-compared
 against what §4 of the RE write-up predicts. Until then, everything below is provisional.
@@ -102,8 +116,10 @@ transport layer (Phase 2) has something solid to sit on.
    compatibility work happens, KT02H20 clones) by descriptor — **no VID/PID device-filter list
    exists in the Android app** (checked during Phase 0's RE pass), so this needs either the
    same VID/PID facts `ktflash` already has (`2972:0102` for JA11) or fresh enumeration.
-2. ⏳ Claim the vendor interface (not the CDC-ACM one) and resolve the real bulk IN/OUT
-   endpoint numbers — currently unknown; see Phase 0 open items.
+2. ⏳ Claim the HID-class interface (not the CDC-ACM one) using the known discovery heuristic
+   (`bInterfaceClass == 3`, exactly 2 endpoints, OUT/IN picked by direction bit) via `rusb`/
+   `nusb` interface descriptors — logic is known (Phase 0), just needs porting to Rust and
+   trying against real hardware.
 3. ⏳ macOS + Linux support via `rusb`/`nusb`, matching `ktflash`'s "no OrbStack needed on
    either platform" bar it eventually reached — but this project's I/O pattern (interactive
    bulk request/reply, not a bulk firmware transfer) is different enough that its own
@@ -122,7 +138,10 @@ transport layer (Phase 2) has something solid to sit on.
 3. ⏳ `ktctl peq set <band> --freq --gain --q --type` — write a single band.
 4. ⏳ `ktctl preset <0-3|off>` — switch the active PEQ preset / disable PEQ.
 5. ⏳ `ktctl gain <dB>` — set global/makeup gain.
-6. ⏳ Safety: refuse out-of-range values client-side (the device's own valid ranges aren't yet
+6. ⏳ `ktctl state` — volume, sample-rate/format, firmware version, mic-detect, UAC mode (the
+   "device state channel" opcodes from Phase 0's §4b: `0x02`/`0x09`/`0x0B`/`0x12`/`0x20`).
+7. ⏳ `ktctl uac <1|2>` — switch UAC 1.0/2.0 mode (`0x20`, read+write).
+8. ⏳ Safety: refuse out-of-range values client-side (the device's own valid ranges aren't yet
    known — Phase 0/2 hardware validation should surface them).
 
 ---
