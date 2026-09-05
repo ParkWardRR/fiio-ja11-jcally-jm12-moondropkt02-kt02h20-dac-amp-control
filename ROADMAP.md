@@ -62,9 +62,9 @@ Phase 5  Packaging + release (binaries, both platforms) ............... ⏳ plan
 4. ✅ **Opcodes recovered** for the JA11 (internal product id `109`):
    | cmd | meaning | payload |
    |---|---|---|
-   | `0x15` | per-band PEQ get/set | `[index, Q×100 (i16 BE), gain×10dB (i16 BE), freq Hz (u16 BE), filterType]` |
-   | `0x16` | PEQ enable / active preset slot | `[value]` (0-3 = preset slot, 4 = off — inferred) |
-   | `0x17` | global/makeup gain | `[gain×10dB (i16 BE)]` |
+   | `0x15` | per-band PEQ get/set | `[index, gain×10dB (i16 BE), freq Hz (u16 BE), Q×100 (i16 BE), filterType]` — byte order corrected 2026-09-05, gain comes before freq/Q |
+   | `0x16` | PEQ enable / active preset | `[value]`: `0`=Vocal, `1`=Classic, `2`=Bass, `3`=USER1 (custom), `4`=off — real names confirmed from FIIO's own WebHID site (not "Classic/Pop/Jazz", a different FIIO product's preset set) |
+   | `0x17` | master/global gain | **Unconfirmed encoding** — this repo's own static RE says `×10dB` big-endian, but two independent hardware-facing projects (`fiiocontrol-oss`, `glacier-eq`) both use `×2560` little-endian and agree with each other; treat `×2560`/LE as more likely correct pending a real JA11 |
 
    Plus, on a **separate frame-builder "channel"** used by the state tab (same wire format,
    different opcode namespace context — see the RE write-up §4b): `0x02` volume, `0x09`
@@ -141,7 +141,14 @@ transport layer (Phase 2) has something solid to sit on.
 6. ⏳ `ktctl state` — volume, sample-rate/format, firmware version, mic-detect, UAC mode (the
    "device state channel" opcodes from Phase 0's §4b: `0x02`/`0x09`/`0x0B`/`0x12`/`0x20`).
 7. ⏳ `ktctl uac <1|2>` — switch UAC 1.0/2.0 mode (`0x20`, read+write).
-8. ⏳ Safety: refuse out-of-range values client-side (the device's own valid ranges aren't yet
+8. ⏳ `ktctl peq save` — commit PEQ edits to the device's persistent storage. **Opcode
+   unresolved**: neither this project's own RE nor the Android app decompile found a distinct
+   save/commit command (band writes might already persist immediately, or there's a separate
+   commit step). Two external open-source drivers each claim one, but disagree: `cmd 0x19`
+   payload `[3]` (`fiiocontrol-oss`, marked JA11-working) vs. `cmd 0x18` payload `[1]`
+   (`glacier-eq`, JA11 marked `Testing`/unconfirmed). Needs hardware to settle — try
+   `fiiocontrol-oss`'s version first, it's the one claimed to work against a real unit.
+9. ⏳ Safety: refuse out-of-range values client-side (the device's own valid ranges aren't yet
    known — Phase 0/2 hardware validation should surface them).
 
 ---

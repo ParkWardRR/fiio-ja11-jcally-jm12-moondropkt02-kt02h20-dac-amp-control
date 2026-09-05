@@ -102,8 +102,14 @@ JA11-relevant code turned out to be plain, decompilable Java/Kotlin):
 - **Frame format**: `02 <AA|BB> <0A|0B> <seq_hi> <seq_lo> <cmd> <len> <payload…> <crc8> EE` —
   `AA 0A` = write, `BB 0B` = read/query, a 16-bit free-running sequence counter, a
   **CRC-8/MAXIM** (Dallas/Maxim 1-Wire) checksum, and a fixed `0xEE` terminator.
-- **Known opcodes**: `0x15` per-PEQ-band get/set (index, Q ×100, gain ×10 dB, freq Hz, filter
-  type), `0x16` PEQ enable / active preset slot, `0x17` global/makeup gain (×10 dB).
+- **Known opcodes**: `0x15` per-PEQ-band get/set (`index, gain ×10 dB, freq Hz, Q ×100, filter
+  type` — corrected byte order, see `research/android-app-re-findings.md` §4), `0x16` PEQ
+  enable / active preset (`0`=Vocal, `1`=Classic, `2`=Bass, `3`=USER1/custom, `4`=off — real
+  names now confirmed from FIIO's own WebHID site, see `research/webhid-control-findings.md`),
+  `0x17` master/global gain — **scale/endianness unconfirmed**: this doc's Android-only read
+  said `×10` big-endian, but two independent hardware-facing implementations
+  (`fiiocontrol-oss`, `glacier-eq`) both use `×2560` little-endian instead and agree with each
+  other; treat `×2560`/little-endian as more likely correct until a real JA11 settles it.
 - **Filter types**: the JA11 supports 3 of FIIO's 7 shared filter types —
   `0`=Peak, `1`=LowShelf, `2`=HighShelf.
 - **Not yet pinned down**: whether the leading `0x02` byte is strictly required, and the exact
