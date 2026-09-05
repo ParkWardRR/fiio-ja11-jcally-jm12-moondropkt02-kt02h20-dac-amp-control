@@ -1,0 +1,10 @@
+# Rust build artifacts
+/target
+/ktctl/target
+**/*.rs.bk
+
+# Cargo lock is kept for the binary crate (see below) — do not ignore it.
+
+# Editor / OS cruft
+.DS_Store
+*.swp
