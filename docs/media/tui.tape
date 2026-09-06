@@ -20,6 +20,17 @@ Sleep 400ms
 Enter
 Sleep 1.8s
 
+# --- Status tab (the default view on launch) ---
+Sleep 800ms
+Up@300ms Up Up
+Sleep 800ms
+Type "u"
+Sleep 1s
+
+# --- Switch to the EQ tab ---
+Tab
+Sleep 1s
+
 # Move across the bands
 Right@500ms Right Right
 Sleep 800ms
@@ -34,12 +45,14 @@ Sleep 500ms
 Down@250ms Down Down Down
 Sleep 1s
 
-# Nudge frequency, cycle preset, write to device
+# Nudge frequency, cycle preset, write, save
 Type "]]]"
 Sleep 800ms
 Type "p"
 Sleep 1s
 Type "w"
+Sleep 1s
+Type "s"
 Sleep 1.5s
 
 # Quit

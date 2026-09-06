@@ -25,10 +25,7 @@ official FiiO Control app's own tab structure (its third tab, "Guide", is just s
 and isn't reproduced here). `Tab` switches views; arrow keys navigate and edit within each.
 Visual theme matches `ktflash`'s TUI on purpose, so the two tools feel like a matched pair.
 
-![ktctl TUI: a live 5-band EQ bar chart with keyboard editing](docs/media/tui.gif)
-
-> The recording above predates the two-tab redesign — regenerate with `vhs docs/media/tui.tape`
-> once the `.tape` script is updated to show both views (see "How to help").
+![ktctl TUI: the Status and EQ tabs, live band editing with keyboard shortcuts](docs/media/tui.gif)
 
 ## The CLI
 

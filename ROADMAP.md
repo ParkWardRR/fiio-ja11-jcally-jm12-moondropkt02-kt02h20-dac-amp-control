@@ -184,8 +184,8 @@ isn't reproduced). Firmware flashing stays out of scope on purpose — that's `k
 4. ✅ Smoke-tested against real hardware directly on macOS (launches, connects, quits cleanly) —
    the underlying `Device` calls (`get_device_state`, `set_volume`, `set_uac`) were already
    hardware-confirmed via the CLI, and the TUI just wires the same calls to keypresses.
-5. ⏳ The demo GIF (`docs/media/tui.gif`) predates this redesign and needs regenerating with
-   `vhs` once `docs/media/tui.tape` is updated to show both tabs.
+5. ✅ Demo GIF (`docs/media/tui.gif`) regenerated with `vhs` from an updated `tui.tape` that
+   exercises both tabs (Status: volume/UAC; EQ: band edit, preset, write, save).
 
 ---
 
