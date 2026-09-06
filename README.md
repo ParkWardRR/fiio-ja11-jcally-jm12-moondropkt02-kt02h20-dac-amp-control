@@ -64,10 +64,14 @@ Try it immediately with no hardware — `--fake` swaps in an in-memory simulator
 ./target/release/ktctl --fake             # launch the TUI
 ```
 
-With a JA11 plugged in, drop `--fake`. **On macOS**, `rusb` cannot claim this device's HID
-interface directly (the same `IOHIDFamily` restriction `ktflash` hit for its own interface) — run
-`ktctl` from a Linux guest with the device passed through (e.g. [OrbStack](https://orbstack.dev):
-`orb usb attach <id>`) until a native macOS companion exists. **On Linux**, USB access may need a
+With a JA11 plugged in, drop `--fake`. **`rusb` claims this device's HID interface natively on
+macOS** — confirmed on real hardware (2026-09-06), full read/write round trip, no OrbStack, no
+companion app needed. If you hit `claim interface 3 failed: Access denied`, grant your
+terminal app **Input Monitoring** access (macOS System Settings → Privacy & Security → Input
+Monitoring) — that's the actual gate on raw HID device access, not a hard platform limitation.
+(An earlier pass of this doc claimed macOS couldn't do this directly at all, by analogy with
+`ktflash`'s own `IOHIDFamily` wall on a *different* interface — wrong for this one; corrected
+once the real cause, a missing TCC grant, was identified.) **On Linux**, USB access may need a
 udev rule or `sudo` the first time (packaged rules are planned — see
 [ROADMAP](ROADMAP.md#phase-5--packaging--release-)).
 
@@ -121,9 +125,10 @@ Edits are staged locally until you press `w`. The TUI uses the same device layer
 ## Status
 
 **Core protocol confirmed on real hardware** (two sessions, 2026-09-06) — not just static
-reverse-engineering anymore. Against a physical JA11 (passed through to a Linux guest since
-`rusb` can't claim the HID interface on macOS), found and fixed four real bugs the static-RE-only
-implementation had, then confirmed a full read/write/save round trip. See
+reverse-engineering anymore. Against a physical JA11 — both via a Linux guest passthrough and,
+later, directly on the macOS host (`rusb` claims the HID interface fine natively; see
+[Install](#install)) — found and fixed four real bugs the static-RE-only implementation had,
+then confirmed a full read/write/save round trip. See
 [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md) for the complete log.
 
 | Question | Status |
@@ -175,8 +180,6 @@ pinned down, in **[`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md)**
   measure), and confirm `×2560`/little-endian produces the expected dB change.
 - **Try `ktctl` against a JCALLY JM12 or Moondrop KT02H20 clone** — the protocol should carry
   over since it's the same silicon, but nobody's confirmed it on a clone yet.
-- **A native macOS companion** (`IOHIDManager`-based, mirroring `ktflash`'s `ktmac`) would drop
-  the OrbStack/Linux-guest requirement for macOS users.
 - [Open an issue](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-control/issues)
   for anything else — even "this opcode didn't do what was expected" is useful signal.
 

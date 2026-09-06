@@ -79,11 +79,13 @@ Phase 5  Packaging + release (binaries, udev rules, both platforms) ...... 🚧 
    UAC 1.0/2.0 mode (read+write). All exposed via `ktctl state` / `ktctl uac`.
 5. ✅ **Interface/endpoint discovery resolved and ported to Rust**: no hardcoded numbers — scans
    for the interface with `bInterfaceClass == 3` (HID) and exactly 2 endpoints, picks OUT/IN by
-   direction bit, force-claims it. **Confirmed on real hardware**: picked interface 3,
-   endpoints `0x03`/`0x83`, exactly as the heuristic predicted. On macOS, `rusb` cannot actually
-   claim this interface (`IOHIDFamily` blocks it, same wall `ktflash` hit) — real testing this
-   session went through an OrbStack Linux guest; a native macOS companion is still open, see
-   [How to help](#-how-to-help).
+   direction bit, force-claims it. **Confirmed on real hardware, both via a Linux guest and
+   directly on the macOS host**: picked interface 3, endpoints `0x03`/`0x83`, exactly as the
+   heuristic predicted — `rusb` claims this interface fine natively on macOS, no companion app
+   or Linux passthrough required. (An earlier note here, by analogy with `ktflash`'s own
+   `IOHIDFamily` wall on a *different* interface, wrongly assumed macOS couldn't do this
+   directly — corrected once tested outside an environment that had been silently blocking the
+   claim.)
 6. ✅ **Filter-type enum resolved**: FIIO's shared PEQ UI defines 7 types (Peak, LowShelf,
    HighShelf, BandPass, LowPass, HighPass, AllPass), but the **JA11's own band-edit screen
    only offers 3** — so on a JA11, `filterType` is `0`=Peak, `1`=LowShelf, `2`=HighShelf.
@@ -129,12 +131,14 @@ solid. `ktctl/src/proto/`:
 2. ✅ Claims the HID-class interface (not the CDC-ACM one) via the descriptor-discovery
    heuristic from Phase 0 — **confirmed on real hardware**: picked interface 3, endpoints
    `0x03`/`0x83`.
-3. ✅ Linux-native, hardware-confirmed via an OrbStack guest this session (real USB device,
-   real reads/writes). **macOS still needs a Linux passthrough** (OrbStack or similar) — `rusb`
-   cannot claim the HID interface directly on macOS, confirmed by direct testing (`sudo` doesn't
-   help; it's a kernel-level exclusive claim, not a Unix permissions issue). A native
-   `IOHIDManager`-based companion (mirroring `ktflash`'s `ktmac`) would close this gap — open,
-   see [How to help](#-how-to-help).
+3. ✅ Hardware-confirmed on **both** Linux (via an OrbStack guest) and **directly on macOS** —
+   `rusb` claims the HID interface fine natively on macOS, no passthrough, no companion app.
+   (This roadmap briefly claimed otherwise, reasoning by analogy with `ktflash`'s own
+   `IOHIDFamily` wall on its *different* CDC interface — wrong for this one. The actual gate on
+   macOS is a **TCC privacy grant**: the terminal app needs **Input Monitoring** access
+   (System Settings → Privacy & Security → Input Monitoring) for `rusb` to claim a raw HID
+   device. `claim interface 3 failed: Access denied` on macOS means check that setting, not
+   reach for a Linux guest.)
 4. ✅ Read/write round-trip against real hardware, including the save/power-cycle/re-read cycle
    — this is the point the whole project stopped being theoretical.
 
@@ -189,8 +193,6 @@ All implemented in `ktctl/src/cli/`, confirmed against real hardware this sessio
 
 ## 💡 Ideas / nice-to-have
 
-- **A native macOS companion** (`IOHIDManager`-based, mirroring `ktflash`'s `ktmac`) to drop the
-  OrbStack/Linux-guest requirement for macOS users — the single biggest remaining UX gap.
 - **Shared crate with `ktflash`** for device enumeration/identification, if the two protocols'
   transport layers turn out to share enough plumbing to be worth de-duplicating.
 - **PEQ preset import/export** as a portable file format, so tunings can be shared the way
@@ -212,6 +214,5 @@ All implemented in `ktctl/src/cli/`, confirmed against real hardware this sessio
   change.
 - **Try `ktctl` against a JCALLY JM12 or Moondrop KT02H20 clone** — protocol should carry over
   since it's the same silicon, but nobody's confirmed it on a clone yet.
-- **A native macOS `IOHIDManager` companion** — see Phase 2/Ideas above.
 - [Open an issue](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-control/issues)
   for anything else — even "this opcode didn't do what was expected" is useful signal.

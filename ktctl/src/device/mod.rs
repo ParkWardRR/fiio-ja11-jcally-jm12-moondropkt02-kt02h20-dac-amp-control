@@ -133,6 +133,17 @@ impl<T: Transport> Device<T> {
         &self.transport
     }
 
+    /// Send an already-encoded request and decode the reply, logging both if
+    /// `--verbose`. Split out of [`Self::exchange`] so a checksum-mismatch
+    /// retry can call it a second time without re-sending the request twice.
+    fn read_reply(&mut self, bytes: &[u8]) -> Result<Frame, DeviceError> {
+        let reply_bytes = self.transport.transceive(bytes)?;
+        if self.verbose {
+            eprintln!("[ktctl]  < {}", hex_dump(&reply_bytes));
+        }
+        self.codec.decode(&reply_bytes).map_err(DeviceError::from)
+    }
+
     /// Encode a request frame, send it, and (for reads) decode+validate the
     /// reply frame. Writes don't get a reply on real hardware (see
     /// [`Transport::send_write`]) — for those, the returned `Frame` is a
@@ -153,13 +164,21 @@ impl<T: Transport> Device<T> {
                 seq,
                 cmd: expected_cmd,
                 payload: Vec::new(),
+                checksum_ok: true,
             });
         }
-        let reply_bytes = self.transport.transceive(&bytes)?;
-        if self.verbose {
-            eprintln!("[ktctl]  < {}", hex_dump(&reply_bytes));
+        // A bad checksum on the first attempt is retried once before giving up:
+        // real hardware showed the very first read right after claiming the
+        // USB interface can carry a stale/garbage CRC even though every other
+        // field is well-formed, and a retry of the identical query returns the
+        // correct, consistent value (see docs/HARDWARE-VALIDATION.md). Beyond
+        // one retry, a persistent bad checksum is more likely a real problem
+        // than a one-off settling glitch, so it's returned as-is rather than
+        // retried indefinitely.
+        let mut reply = self.read_reply(&bytes)?;
+        if !reply.checksum_ok {
+            reply = self.read_reply(&bytes)?;
         }
-        let reply = self.codec.decode(&reply_bytes)?;
         if reply.cmd != expected_cmd {
             return Err(DeviceError::UnexpectedOpcode {
                 expected: expected_cmd,

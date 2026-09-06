@@ -79,6 +79,11 @@ pub struct Frame {
     pub cmd: u8,
     /// Command payload (`len` bytes on the wire).
     pub payload: Vec<u8>,
+    /// Whether the frame's CRC-8 matched on decode. Always `true` for a
+    /// freshly-constructed [`Frame`] (e.g. via [`Frame::write`]/[`Frame::read`]);
+    /// only meaningful on the output of [`FrameCodec::decode`]. See that
+    /// function's docs for why a mismatch here doesn't fail the parse.
+    pub checksum_ok: bool,
 }
 
 impl Frame {
@@ -89,6 +94,7 @@ impl Frame {
             seq,
             cmd,
             payload: payload.into(),
+            checksum_ok: true,
         }
     }
 
@@ -99,6 +105,7 @@ impl Frame {
             seq,
             cmd,
             payload: payload.into(),
+            checksum_ok: true,
         }
     }
 }
@@ -131,14 +138,9 @@ pub enum FrameError {
         /// Actual buffer length.
         buffer: usize,
     },
-    /// CRC did not validate.
-    #[error("crc mismatch: computed {computed:#04x}, frame carried {carried:#04x}")]
-    CrcMismatch {
-        /// CRC we computed over the frame.
-        computed: u8,
-        /// CRC byte present in the frame.
-        carried: u8,
-    },
+    // Note: there is deliberately no `CrcMismatch` variant. A checksum
+    // mismatch doesn't fail the parse — see `Frame::checksum_ok` and
+    // `FrameCodec::decode`'s doc comment for why.
 }
 
 /// Stateless-ish encoder/decoder holding an auto-incrementing sequence counter.
@@ -244,15 +246,21 @@ impl FrameCodec {
 
         // Use the same centralised scope `encode` uses (see `crc_scope`'s docs
         // for why it's `seq_hi..=last payload byte`, not `magic..=...`).
+        //
+        // A mismatch here does NOT fail the parse — it's surfaced via
+        // `Frame::checksum_ok` instead. Confirmed on real hardware
+        // (2026-09-06, see `docs/HARDWARE-VALIDATION.md`): the very first read
+        // right after claiming the USB interface can carry a stale/garbage CRC
+        // even though every other field (seq/cmd/len/payload/term) is well-formed
+        // and a retry of the identical query returns the correct, consistent
+        // value. Hard-failing there would turn a one-off connection-settling
+        // glitch into a wrongly-fatal error; the caller (`Device::exchange`)
+        // retries once on `checksum_ok == false` instead.
         let computed = crc8_maxim(Self::crc_scope(&buf[..7 + declared]));
-        if computed != carried_crc {
-            return Err(FrameError::CrcMismatch {
-                computed,
-                carried: carried_crc,
-            });
-        }
+        let checksum_ok = computed == carried_crc;
 
         Ok(Frame {
+            checksum_ok,
             direction,
             seq,
             cmd,
@@ -330,15 +338,17 @@ mod tests {
     }
 
     #[test]
-    fn detects_crc_corruption() {
+    fn detects_crc_corruption_without_failing_the_parse() {
+        // A bad CRC is surfaced via `checksum_ok`, not a hard error -- real
+        // hardware showed a transient bad-CRC read can still carry an
+        // otherwise well-formed, correct frame (see HARDWARE-VALIDATION.md).
         let codec = FrameCodec::new();
         let mut bytes = codec.encode(&Frame::write(1, 0x17, vec![0xDE, 0xAD]));
         let crc_idx = bytes.len() - 2;
         bytes[crc_idx] ^= 0xFF;
-        assert!(matches!(
-            codec.decode(&bytes),
-            Err(FrameError::CrcMismatch { .. })
-        ));
+        let frame = codec.decode(&bytes).expect("still parses");
+        assert!(!frame.checksum_ok);
+        assert_eq!(frame.payload, vec![0xDE, 0xAD]);
     }
 
     #[test]

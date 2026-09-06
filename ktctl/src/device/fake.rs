@@ -94,6 +94,7 @@ impl FakeDevice {
             seq: req.seq,
             cmd: req.cmd,
             payload,
+            checksum_ok: true,
         };
         self.codec.encode(&frame)
     }

@@ -1,11 +1,17 @@
 # Hardware validation log — 2026-09-06
 
-First real-hardware session against a physical JA11. Transport: macOS host, dongle passed
-through to an OrbStack Ubuntu guest (`orb usb attach`) because `rusb`/libusb **cannot** claim
-this device's HID interface natively on macOS — confirmed directly (`claim interface 3 failed:
-Access denied`, unaffected by `sudo`), the same kernel-level `IOHIDFamily` wall `ktflash` already
-solved once for the CDC interface via its `ktmac` companion. This is the first time this project
-needed to actually route around it itself.
+First real-hardware session against a physical JA11. Transport (first pass): macOS host, dongle
+passed through to an OrbStack Ubuntu guest (`orb usb attach`), because an initial direct attempt
+failed with `claim interface 3 failed: Access denied`, unaffected by `sudo`. That looked at
+first like the same kernel-level `IOHIDFamily` wall `ktflash` already had to route around for
+its own CDC interface via its `ktmac` companion — **it wasn't**. A later session, on the same
+Mac, confirmed `rusb` claims this HID interface (read *and* write) perfectly fine directly on
+macOS with no companion app and no Linux guest. The actual gate: the terminal/app running
+`ktctl` needs **Input Monitoring** permission (macOS System Settings → Privacy & Security →
+Input Monitoring) — a TCC privacy grant for raw HID device access, not a hard platform
+limitation. `claim interface 3 failed: Access denied` on macOS means check that setting first.
+The OrbStack path below remains valid (and is exactly how this session's testing was actually
+done), just not the *only* way, and not evidence of a `ktmac`-style wall on this interface.
 
 ## Bugs found and fixed
 
