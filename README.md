@@ -1,172 +1,204 @@
 <div align="center">
 
-# 🎚️ ktctl · FiiO JA11 · KTMicro KT02H20 runtime control
+# 🎚️ ktctl
 
-### Control your FiiO JA11's PEQ, EQ, and live state from macOS or Linux — no phone, no Windows.
+**Control the FiiO JA11's parametric EQ, presets, and gain from your terminal — on macOS and Linux, with no Android phone, no Windows, and no firmware flashing.**
 
-**The FiiO Control Android app is the only way FiiO officially supports tuning the JA11's
-5‑band PEQ and gain. This project reverse‑engineers that app's USB control protocol so you
-can do the same thing from a terminal — a native Rust CLI + TUI, cross‑platform, no OTG
-phone dance required.**
+A native Rust **CLI + TUI** that speaks the JA11's runtime USB control protocol directly. Also targets the KTMicro **KT02H20** clones that share the same silicon (JCALLY JM12, Moondrop dongles).
 
 <p>
   <img alt="License: Blue Oak 1.0.0" src="https://img.shields.io/badge/license-Blue%20Oak%201.0.0-1a73e8">
-  <img alt="Rust" src="https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust&logoColor=white">
-  <img alt="macOS + Linux" src="https://img.shields.io/badge/target-macOS%20%2B%20Linux-000?logo=apple&logoColor=white">
-  <img alt="Status: core protocol confirmed on hardware" src="https://img.shields.io/badge/status-core%20protocol%20confirmed%20on%20hardware-2ea44f">
-  <img alt="Hardware validation: first pass done 2026-09-06" src="https://img.shields.io/badge/hardware%20validation-first%20pass%20done-2ea44f">
+  <img alt="Built with Rust" src="https://img.shields.io/badge/Rust-dea584?logo=rust&logoColor=white">
+  <img alt="macOS + Linux" src="https://img.shields.io/badge/macOS%20%2B%20Linux-000?logo=apple&logoColor=white">
+  <img alt="Status: core protocol confirmed on hardware" src="https://img.shields.io/badge/core%20protocol-confirmed%20on%20hardware-2ea44f">
+  <img alt="Hardware validation: two sessions done" src="https://img.shields.io/badge/hardware%20validation-2%20sessions%20done-2ea44f">
 </p>
 
 </div>
 
 ---
 
-## 🎧 The idea
+## The interactive TUI
 
-The **FiiO JA11** (and the cheaper KTMicro `KT02H20`-based clones it shares silicon with —
-JCALLY JM12, Moondrop's dongle, and more) exposes a **runtime USB control channel** that the
-official FiiO Control Android app uses to read and write its 5‑band parametric EQ, EQ
-enable/preset state, and global gain. That channel has never been documented — until now.
+Run `ktctl` with no arguments for a live EQ editor — arrow keys to select and shape each band, `w` to write.
 
-This is the **sibling project** to
-[`ktflash`](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit),
-which reverse-engineered the JA11's *firmware-flashing* protocol (cross-flashing JA11 firmware
-onto compatible clones). `ktflash` answers "what firmware is on this dongle, and how do I change
-it." **`ktctl`** answers "what is this dongle doing *right now*, and how do I tune it" — PEQ
-bands, gain, presets — **without ever touching flash**.
+![ktctl TUI: a live 5-band EQ bar chart with keyboard editing](docs/media/tui.gif)
 
-| You want to… | Status |
-|---|---|
-| 🎚️ **Read** the current PEQ bands / gain / preset | ⏳ protocol known, not yet implemented |
-| ✏️ **Write** a PEQ band (freq / gain / Q / filter type) | ⏳ protocol known, not yet implemented |
-| 🔀 **Switch presets** / toggle PEQ on-off | ⏳ protocol known, not yet implemented |
-| 📊 **Live TUI** — see + edit the EQ curve interactively | ⏳ planned, no code yet |
-| 🔎 **See how the protocol was reversed** | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) *(coming — ported from the toolkit's `research/android-app-re-findings.md`)* |
-| 🗺️ **See the plan** | [ROADMAP.md](ROADMAP.md) |
+## The CLI
 
-> [!IMPORTANT]
-> **The core protocol is now confirmed against a real JA11** (2026-09-06) — transport, frame
-> format, CRC, and per-band PEQ round-trip all work end-to-end on real hardware, after fixing
-> three bugs the static-RE-only implementation had (see
-> [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md)). Still open: the save/commit
-> opcode (needs a power-cycle test) and the exact firmware-version semantics — see
-> [Phase 0](ROADMAP.md#phase-0--protocol-recovery-) for the full confirmed-vs-open breakdown.
+Every setting is scriptable, with `--json` for automation.
 
-> [!NOTE]
-> **Why not iOS?** Confirmed straight from FIIO's own support docs, not just platform
-> speculation: [*"How to control the JA11 via the FiiO Control APP in Android mobile
-> phone?"*](https://fiiosupport.freshdesk.com/support/solutions/articles/69000869868-how-to-control-the-ja11-via-the-fiio-control-app-in-android-mobile-phone-)
-> states plainly — **"The JA11 could not be controlled via the iOS version FiiO Control APP."**
-> Apple gives third-party apps no general USB-host API (only `ExternalAccessory` for
-> MFi-certified accessories, which this isn't) — the same wall FIIO itself hit. That's why this
-> project targets **macOS + Linux** as native desktop apps instead of iOS.
+![ktctl CLI: probe, peq get, peq set, and state commands](docs/media/cli.gif)
+
+> Both recordings above run against the built-in simulator (`--fake`) — no hardware required to reproduce them.
 
 ---
 
-## 🎯 What `ktctl` should replicate
+## Why this exists
 
-Confirmed against FIIO's own support docs
-([*"How to control the JA11 via the FiiO Control APP in Android mobile phone?"*](https://fiiosupport.freshdesk.com/support/solutions/articles/69000869868-how-to-control-the-ja11-via-the-fiio-control-app-in-android-mobile-phone-),
-screenshots included) — this is the actual, real-device UI `ktctl`'s CLI/TUI is targeting
-feature-parity with:
-
-| Screen | What it shows / does |
-|---|---|
-| **My devices** | Device card: name (`JadeAudio JA11`) + connection status (`connected`). |
-| **EQ** | Live curve graph over a 5-band PEQ (bands seen at `29 / 81 / 600 / 7460 / 15660 Hz`, gains `±12 dB` range), a **master gain** slider (separate from the bands, `0 dB` center), an EQ on/off toggle, `Custom` / `Advanced Settings` / `save` actions. |
-| **Status** | Device name, **firmware version**, **sample rate** (e.g. `384k`), **in-line microphone** detect (on/off), **UAC version** selector (`UAC 1.0` / `UAC 2.0`, tap to switch), **device volume** (tap to open a detail view). |
-| **Guide** | Static help/tutorial content — low priority, not really "control." |
-
-This maps directly onto the opcodes in [ROADMAP.md Phase 0](ROADMAP.md#phase-0--protocol-recovery-):
-EQ screen → `0x15`/`0x16`/`0x17`; Status screen → `0x02`/`0x09`/`0x0B`/`0x12`/`0x20`. The
-screenshots are strong **semantic** corroboration of what each opcode does (the values on
-screen — volume `60`, sample rate `384k`, mic detect `ON`, `UAC 2.0` — line up exactly with
-what the RE predicted), though they don't confirm the **wire bytes** — that still needs
-hardware. One open discrepancy worth tracking: the Status screen's displayed version (`1.4`)
-doesn't match the `V2.2` firmware image analyzed in `ktflash`'s RE — possibly a
-protocol/hardware revision string distinct from the flashable firmware build; needs a real
-device to resolve.
+FiiO only ships EQ control for the JA11 as an **Android** app. There's no iOS app — Apple gives
+third-party apps no general USB-host API (only `ExternalAccessory` for MFi-certified accessories,
+which this isn't), and [FiiO's own support docs confirm the JA11 can't be controlled from the iOS
+FiiO Control app](https://fiiosupport.freshdesk.com/support/solutions/articles/69000869868-how-to-control-the-ja11-via-the-fiio-control-app-in-android-mobile-phone-)
+— and there's no first-class desktop tool either. `ktctl` reverse-engineers that Android app's
+USB control protocol so you get the same 5-band PEQ, preset, and gain control from a Mac or Linux
+terminal. It only touches **runtime** state — the same thing the app's EQ screen changes — never
+firmware.
 
 ---
 
-## 🔍 What's already known (from static RE)
+## Install
 
-Recovered from the FiiO Control Android app's Java layer (not its Flutter/Dart layer — the
-JA11-relevant code turned out to be plain, decompilable Java/Kotlin):
-
-- **Transport**: raw USB bulk transfer against the device's **HID-class interface**, claimed
-  directly via `UsbDeviceConnection` (bypassing the OS HID class driver), not the CDC-ACM serial
-  port `ktflash` uses for firmware flashing — a *different* interface on the same device. The
-  interface/endpoints are **descriptor-discovered, not hardcoded**: the first interface with
-  `bInterfaceClass == 3` (HID) and exactly 2 endpoints, OUT/IN picked by direction bit.
-- **Frame format**: `02 <AA|BB> <0A|0B> <seq_hi> <seq_lo> <cmd> <len> <payload…> <crc8> EE` —
-  `AA 0A` = write, `BB 0B` = read/query, a 16-bit free-running sequence counter, a
-  **CRC-8/MAXIM** (Dallas/Maxim 1-Wire) checksum, and a fixed `0xEE` terminator.
-  **Hardware-confirmed 2026-09-06** — see [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md).
-  The CRC scope was wrong in earlier static-RE-only passes of this doc: it's `seq_hi..=last
-  payload byte`, **not** `magic..=last payload byte` — `magic`/`dir` are excluded.
-- **Known opcodes**: `0x15` per-PEQ-band get/set (`index, gain ×10 dB, freq Hz, Q ×100, filter
-  type` — byte order confirmed against real hardware, band 0 read back `freq=1000 Hz`/`Q=0.70`
-  exactly as written), `0x16` PEQ enable / active preset (`0`=Vocal, `1`=Classic, `2`=Bass,
-  `3`=USER1/custom, `4`=off — real names confirmed from FIIO's own WebHID site), `0x17`
-  master/global gain, `×2560` little-endian — strong hardware evidence (write `-3.0 dB` → reads
-  back `-2.9 dB`, a single quantization step off, not the order-of-magnitude mismatch the
-  alternative `×10 be` encoding would produce).
-- **Filter types**: the JA11 supports 3 of FIIO's 7 shared filter types —
-  `0`=Peak, `1`=LowShelf, `2`=HighShelf.
-- **Writes don't get an ACK on this channel** — confirmed on hardware; `ktctl` no longer waits
-  for one (see `docs/HARDWARE-VALIDATION.md` bug #3).
-- **Save/commit-to-flash confirmed**: `cmd 0x19` payload `[0x03]` genuinely persists PEQ edits
-  across a power cycle — verified by writing a distinctive band value, saving, confirming a real
-  power cycle, and reading it back unchanged. `--save-command 0x18` remains available as an
-  untested fallback.
-- **Firmware version resolved**: the wire value now matches the app exactly (`1.4`) once the
-  second payload byte is read as BCD rather than decimal.
-
-Full detail lives in `ktflash`'s
-[`research/android-app-re-findings.md`](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit/blob/main/research/android-app-re-findings.md)
-§4 — that write-up will be ported into this repo's `docs/PROTOCOL.md` as Phase 0 work here.
-
----
-
-## 🚀 Quickstart
-
-There's no binary yet — this repo currently exists to track the plan. Once Phase 1/2 land:
+Requires a [Rust toolchain](https://rustup.rs) (1.75+). USB support is on by default.
 
 ```bash
-cd ktctl && cargo build --release
-./target/release/ktctl probe          # identify a connected JA11
-./target/release/ktctl peq get        # read the 5 PEQ bands + gain + preset
-./target/release/ktctl peq set 0 --freq 1000 --gain -3.0 --q 0.7   # write band 0
-./target/release/ktctl                # TUI dashboard
+git clone https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-control.git
+cd fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-control/ktctl
+cargo build --release          # → target/release/ktctl
 ```
 
-Follow progress in [ROADMAP.md](ROADMAP.md).
+Try it immediately with no hardware — `--fake` swaps in an in-memory simulator:
+
+```bash
+./target/release/ktctl --fake peq get     # read the EQ
+./target/release/ktctl --fake             # launch the TUI
+```
+
+With a JA11 plugged in, drop `--fake`. **On macOS**, `rusb` cannot claim this device's HID
+interface directly (the same `IOHIDFamily` restriction `ktflash` hit for its own interface) — run
+`ktctl` from a Linux guest with the device passed through (e.g. [OrbStack](https://orbstack.dev):
+`orb usb attach <id>`) until a native macOS companion exists. **On Linux**, USB access may need a
+udev rule or `sudo` the first time (packaged rules are planned — see
+[ROADMAP](ROADMAP.md#phase-5--packaging--release-)).
 
 ---
 
-## 🙌 How to help
+## Commands
 
-- **A JA11 (or a KT02H20 clone) and a USB capture tool** (Wireshark + `usbmon` on Linux, or a
-  hardware USB analyzer) — the single biggest unblock. Recording one PEQ read + one PEQ write
-  from the official Android app would confirm or correct everything in
-  [Phase 0](ROADMAP.md#phase-0--protocol-recovery-).
-- **Rust**: `rusb`/`nusb` experience for the USB transport layer, `ratatui` experience for the
-  TUI (this project intentionally mirrors `ktflash`'s stack and style).
-- Report findings against real hardware as GitHub issues — even a "this opcode didn't do what
-  the app's code implied" is useful signal.
+```
+ktctl [--fake] [--json] [-v] [COMMAND]
+
+  (no command)     Launch the interactive TUI dashboard
+  probe            Identify the device (firmware + active preset)
+  peq get          Read all 5 bands + gain + preset (table or --json)
+  peq set <n>      Write band n: --freq <Hz> --gain <dB> --q <Q> --type <t>
+  peq save         Commit edits to the device's persistent storage
+  preset <p>       vocal | classic | bass | user1 | off   (or 0-4)
+  gain <dB>        Set master / makeup gain
+  state            Volume, sample rate, firmware, mic, UAC mode
+  uac <1|2>        Switch USB Audio Class mode
+  list             List connected JA11 / KT02H20-family USB devices
+```
+
+Examples:
+
+```bash
+ktctl peq set 2 --gain 4 --q 1.4 --type peak    # boost 600 Hz +4 dB
+ktctl peq set 4 --type high-shelf --gain -2      # tame the top end
+ktctl preset bass
+ktctl gain -3.0
+ktctl peq save                                    # persist edits to flash
+ktctl --json peq get | jq '.bands'               # machine-readable
+ktctl -v probe                                    # dump raw USB frames
+```
+
+- **Filter types:** `peak` (0), `low-shelf` (1), `high-shelf` (2).
+- **Presets:** `vocal` (0), `classic` (1), `bass` (2), `user1` (3, custom), `off` (4).
+- **Client-side guards:** freq 20–20000 Hz, gain ±12 dB, Q 0.1–20 (conservative bounds from FiiO's UI).
+
+### TUI keys
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| `←` `→` / `h` `l` | Select band | `p` | Cycle preset |
+| `↑` `↓` / `k` `j` | Gain ±0.5 dB | `w` | Write to device |
+| `[` `]` | Frequency | `q` / `Esc` | Quit |
+
+Edits are staged locally until you press `w`. The TUI uses the same device layer as the CLI, so `--fake` works here too.
+
+---
+
+## Status
+
+**Core protocol confirmed on real hardware** (two sessions, 2026-09-06) — not just static
+reverse-engineering anymore. Against a physical JA11 (passed through to a Linux guest since
+`rusb` can't claim the HID interface on macOS), found and fixed four real bugs the static-RE-only
+implementation had, then confirmed a full read/write/save round trip. See
+[`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md) for the complete log.
+
+| Question | Status |
+|---|---|
+| Frame format, transport, interface discovery | ✅ confirmed byte-exact on real hardware |
+| CRC-8 scope (`seq_hi..=payload`, excludes `magic`/`dir`) | ✅ confirmed — brute-forced against real device-computed CRCs, including a probe that drove `seq` past 255 to settle the last ambiguity |
+| Per-band PEQ byte order (`index, gain, freq, Q, type`) | ✅ confirmed — band 0 read back exactly as written |
+| Save/commit opcode (`cmd 0x19`, payload `[0x03]`) | ✅ confirmed — wrote a distinctive band, saved, power-cycled the device for real, read it back unchanged |
+| Firmware version format (BCD, not decimal) | ✅ confirmed — now prints `1.4`, an exact match with the official app |
+| Writes don't get an ACK on this channel | ✅ confirmed — `ktctl` no longer waits for one |
+| Master-gain encoding (`×2560` little-endian) | 🟡 round-trip-confirmed, not yet audio-confirmed — the only open item |
+
+Nothing here touches flash except the explicit `peq save` step, so it remains low-stakes to test.
+
+---
+
+## Compatibility
+
+| Device | Silicon | Status |
+|---|---|---|
+| **FiiO JA11** (JadeAudio) | KTMicro KT02H20 | Primary target — VID/PID `2972:0102`, hardware-confirmed |
+| **JCALLY JM12** | KTMicro KT02H20 | Shares silicon; expected, unverified |
+| **Moondrop** KT02H20 dongles | KTMicro KT02H20 | Same family; expected, unverified |
+
+The USB interface is descriptor-discovered (first HID-class interface with 2 endpoints), not hardcoded, so KT02H20 siblings have a good chance of working.
+
+---
+
+## How it works
+
+`ktctl` speaks the JA11's runtime control protocol: a raw USB **bulk transfer** on the device's **HID-class interface** (not the CDC serial port used for flashing), with a compact framed protocol:
+
+```text
+ 0x02  <AA|BB> <0A|0B>  <seq_hi seq_lo>  <cmd>  <len>  <payload…>  <crc8>  0xEE
+ lead   magic    dir       16-bit seq      op    len     n bytes    MAXIM   term
+```
+
+`AA 0A` = write, `BB 0B` = read; CRC-8/MAXIM checksum over `seq_hi..=payload`; `0xEE` terminator.
+EQ opcodes `0x15`/`0x16`/`0x17` (band, preset, gain); status opcodes `0x02`/`0x09`/`0x0B`/`0x12`/`0x20`
+(volume, sample rate, firmware, mic, UAC); `0x19` (save). Full spec, including how each byte was
+pinned down, in **[`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md)** and
+**[`docs/PROTOCOL.md`](docs/PROTOCOL.md)**.
+
+---
+
+## How to help
+
+- **Audio-confirm the master-gain encoding** — the last open item. Set a gain value, listen (or
+  measure), and confirm `×2560`/little-endian produces the expected dB change.
+- **Try `ktctl` against a JCALLY JM12 or Moondrop KT02H20 clone** — the protocol should carry
+  over since it's the same silicon, but nobody's confirmed it on a clone yet.
+- **A native macOS companion** (`IOHIDManager`-based, mirroring `ktflash`'s `ktmac`) would drop
+  the OrbStack/Linux-guest requirement for macOS users.
+- [Open an issue](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-control/issues)
+  for anything else — even "this opcode didn't do what was expected" is useful signal.
+
+> Regenerate the demo GIFs with [`vhs`](https://github.com/charmbracelet/vhs): `vhs docs/media/tui.tape` and `vhs docs/media/cli.tape` from the repo root.
 
 ---
 
 ## Relationship to `ktflash`
 
-|  | [`ktflash`](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit) | `ktctl` (this repo) |
-|---|---|---|
-| Question it answers | "What firmware is on this dongle, and how do I change it?" | "What is this dongle doing right now, and how do I tune it?" |
-| Protocol | CDC bootloader (`8888:cdc0`), reversed from the Windows vendor tool + independently confirmed from the Android app | Runtime vendor USB interface, reversed from the Android app only |
-| Touches flash? | Yes — this is a firmware writer | No — pure runtime control, nothing persisted to flash |
-| Status | ✅ native write proven on hardware, v1.2.0 released | ⏳ protocol reversed, nothing implemented yet |
+[**`ktflash`**](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit) is the sibling project for **firmware** (reading and cross-flashing the JA11).
 
-Separate repos on purpose: different risk profile (this never touches flash, so it's much
-lower-stakes to run), different protocol, different USB interface — no reason to couple their
-release cadences.
+|  | `ktflash` | `ktctl` (this repo) |
+|---|---|---|
+| Answers | "What firmware is on this dongle, and how do I change it?" | "What is this dongle doing now, and how do I tune it?" |
+| Protocol | CDC bootloader (`8888:cdc0`) | Runtime HID vendor channel |
+| Touches flash? | **Yes** — firmware writer | **No** — runtime only (except the explicit `peq save`, which persists EQ settings, not firmware) |
+| Status | ✅ proven on hardware, released | ✅ core protocol hardware-confirmed |
+
+Separate repos on purpose: different risk profile, different protocol, different USB interface — no reason to couple their release cadences.
+
+---
+
+## License
+
+[Blue Oak Model License 1.0.0](LICENSE.md).
