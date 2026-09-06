@@ -116,9 +116,12 @@ JA11-relevant code turned out to be plain, decompilable Java/Kotlin):
   `0`=Peak, `1`=LowShelf, `2`=HighShelf.
 - **Writes don't get an ACK on this channel** — confirmed on hardware; `ktctl` no longer waits
   for one (see `docs/HARDWARE-VALIDATION.md` bug #3).
-- **Not yet pinned down**: the save/commit-to-flash opcode (needs a power-cycle test to confirm
-  persistence) and whether the CRC scope truly starts at `seq_hi` or just `seq_lo` (both samples
-  so far had `seq_hi == 0`, which is indistinguishable from omitting it for this CRC).
+- **Save/commit-to-flash confirmed**: `cmd 0x19` payload `[0x03]` genuinely persists PEQ edits
+  across a power cycle — verified by writing a distinctive band value, saving, confirming a real
+  power cycle, and reading it back unchanged. `--save-command 0x18` remains available as an
+  untested fallback.
+- **Firmware version resolved**: the wire value now matches the app exactly (`1.4`) once the
+  second payload byte is read as BCD rather than decimal.
 
 Full detail lives in `ktflash`'s
 [`research/android-app-re-findings.md`](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit/blob/main/research/android-app-re-findings.md)

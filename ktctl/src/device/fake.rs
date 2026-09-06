@@ -35,7 +35,7 @@ impl Default for FakeStatus {
         FakeStatus {
             volume: 60,           // screenshot value
             sample_rate_index: 7, // "384k" in SAMPLE_RATE_TABLE
-            firmware: [1, 4],     // screenshot showed "1.4"
+            firmware: [0x02, 0x14], // real hardware bytes (2026-09-06); decodes to "1.4" via BCD
             mic_present: true,    // screenshot showed mic ON
             uac: 2,               // screenshot showed UAC 2.0
         }

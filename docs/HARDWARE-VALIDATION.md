@@ -26,11 +26,22 @@ so not a coincidental match) against the real carried CRC byte shows the actual 
 **`seq_hi..=last payload byte`** — `magic`/`dir` (bytes 1-2) are excluded entirely. Centralized in
 `FrameCodec::crc_scope`; both `encode` and `decode` now share it (previously only `encode` did).
 
-*Caveat correctly narrowed, not fully closed*: both samples happened to have `seq_hi == 0x00`,
-and a leading zero byte is a provable no-op for this CRC when the running state is already zero
-— so these two samples can't distinguish "starts at `seq_hi`" from "starts at `seq_lo`". The
-wider (`seq_hi`-inclusive) scope was chosen as the safe default; re-confirm once a session's
-`seq` counter has wrapped past 255 and a nonzero `seq_hi` is observed on the wire.
+**Fully settled** (was left open as of the first pass at this doc): the original two samples both
+had `seq_hi == 0x00`, and a leading zero byte is a provable no-op for this CRC — so they couldn't
+distinguish "starts at `seq_hi`" from "starts at `seq_lo`". Wrote a one-off probe
+(`examples/seq_wrap_probe.rs`) that drives 260 real read requests in one session to push `seq`
+past 255; the five replies with `seq_hi == 0x01` all match the `seq_hi`-inclusive scope and none
+match the `seq_lo`-only alternative. `seq_hi` is definitively part of the CRC.
+
+**Aside — a real, reproducible transport quirk found along the way**: the very first read
+immediately after a fresh interface claim (right after `orb usb attach`/reattach) returned a
+CRC that didn't match a repeat of the exact same request one command later — initially looked
+like a deeper protocol mystery (a hidden device-side counter?), but reattaching and reading three
+times in a row showed read #1 differs while reads #2 and #3 are identical to each other and to
+every other capture of that same query. This is a connection-settling artifact, not a protocol
+property — the first bulk IN read after claiming the interface can return a stale/garbage report.
+Not yet fixed in code (no repro outside this specific OrbStack passthrough setup to test against),
+but worth a defensive "discard the first read after opening" if this recurs elsewhere.
 
 **Important scope note on this finding itself**: the "request" side of my initial brute-force
 search was circular — the target CRCs for outgoing requests were bytes `ktctl`'s own `encode()`
@@ -52,6 +63,27 @@ trait method (default falls back to the old symmetric behavior, for the fake/tes
 `UsbTransport` overrides it to skip the read entirely. No caller ever inspected a write's "reply"
 payload, so this is a pure bug fix, not a behavior change for any real use.
 
+### 4. Firmware version formula was wrong (`proto/state.rs`)
+
+The `0x0B` reply's raw payload `02 14` was decoded byte-for-byte as `"{byte0}.{byte1}"` = `"2.20"`,
+but the FIIO Control app's Status screen shows `"1.4"` for the same device. `0x14`'s two nibbles
+are `1` and `4` — the *second* payload byte is BCD (major in the high nibble, minor in the low),
+not two independent decimal integers, and it alone is the user-facing version string. The first
+byte (`0x02`) decodes to something else, still unidentified. Fixed `firmware_version()` to read
+the second byte's nibbles; confirmed against real hardware (`ktctl state` now prints `1.4`,
+matching the app exactly).
+
+### 5. Save/commit-to-flash opcode confirmed
+
+Neither the Windows tool nor the Android app decompile ever found a distinct "persist to flash"
+command; two external drivers each guessed a different one. Settled by hardware: wrote band 0 to
+`3333 Hz / +4.0 dB / Q 0.55 / low-shelf` — values nothing would produce by accident — issued
+`ktctl peq save` (`cmd 0x19`, payload `[0x03]`, `fiiocontrol-oss`'s candidate), confirmed a real
+power cycle (the device's USB enumeration changed), and read band 0 back: unchanged. Refactored
+`Device::save()`/`SaveCommand` from a "try both, return whichever succeeds" loop (which silently
+broke once bug #3 above meant writes never error) into an explicit, CLI-selectable choice
+(`--save-command 0x19|0x18`) — `Cmd19Payload3` is confirmed and stays the default.
+
 ## What's now confirmed on real hardware (not just static RE)
 
 - **Transport**: HID-class interface (3), 2 endpoints, `out 0x03`/`in 0x83`, exactly as the
@@ -72,17 +104,17 @@ payload, so this is a pure bug fix, not a behavior change for any real use.
 
 ## Open items surfaced by this session
 
-1. **`0x0B` doesn't match the app's displayed firmware version.** Raw reply payload `02 14`
-   decodes (via this project's `"{byte0}.{byte1}"` formula) as `2.20`; the FIIO Control app's own
-   Status screen shows `1.4` for what should be the same device (per the earlier research
-   screenshots). Possibly two distinct version concepts (a protocol/hardware revision vs. an
-   app-displayed firmware build), possibly a formatting bug in this project's decode. Unresolved
-   — needs comparing against the app's own reading on the *same* device state, not a different
-   session.
-2. **Save/commit opcode still untested.** `0x19`/`[3]` vs `0x18`/`[1]` (see `ROADMAP.md`) needs a
-   write → save → power-cycle → re-read test; a power cycle requires physically unplugging the
-   device, not something scriptable from this session.
-3. **`seq_hi`-inclusive vs `seq_lo`-only CRC scope** (see bug #2 above) — needs a session where
-   `seq` has wrapped past 255.
+1. ~~`0x0B` doesn't match the app's displayed firmware version~~ **resolved**. Raw reply payload
+   `02 14` decodes to `1.4` — an exact match with the FIIO app's Status screen — once the *second*
+   byte is read as BCD (`0x14`'s nibbles are `1` and `4`) rather than as two independent decimal
+   integers. The first byte (`0x02`) is a separate, still-unidentified field, not part of the
+   version string. See `proto::state::firmware_version`'s doc comment.
+2. ~~Save/commit opcode~~ **resolved**. `Cmd19Payload3` (`cmd 0x19`, payload `[0x03]`) confirmed
+   to persist: wrote band 0 to `3333 Hz / +4.0 dB / Q 0.55 / low-shelf` (values nothing would
+   produce by accident), issued `save`, confirmed a real power cycle (device re-enumerated with a
+   new bus address), and read band 0 back afterward — unchanged. `Cmd18Payload1` was not
+   separately tested since the working candidate was found first.
+3. ~~`seq_hi`-inclusive vs `seq_lo`-only CRC scope~~ **resolved** — see bug #2 above.
 4. **Master gain still not audio-confirmed** — the round-trip is self-consistent and the
    magnitude is very plausible, but only a listening/measurement test would fully close this out.
+   This is now the only unresolved item from this session.

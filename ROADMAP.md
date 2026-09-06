@@ -28,9 +28,11 @@ vendor utility for this particular channel to fall back on).
 > the corrected per-band byte order is now confirmed *from the wire*, not just re-derived from
 > decompiled code. Full log: [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md).
 > Static RE background: [ktflash's `research/android-app-re-findings.md` §4](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit/blob/main/research/android-app-re-findings.md).
-> Still open: the save/commit opcode (needs a power-cycle test), and the exact firmware-version
-> semantics (the wire value doesn't match what the official app displays) — see the validation
-> log's "Open items."
+> The save/commit opcode is now confirmed too (`cmd 0x19`, payload `[0x03]`; wrote a distinctive
+> PEQ band, saved, power-cycled the device for real, read it back unchanged), and the
+> firmware-version mismatch is resolved (the second payload byte is BCD, not decimal — decodes to
+> `1.4`, an exact match). The only item left open from this session: master gain's `×2560`
+> little-endian encoding is round-trip-confirmed but not yet audio-confirmed.
 
 ---
 
@@ -94,14 +96,18 @@ Phase 5  Packaging + release (binaries, both platforms) ............... ⏳ plan
    fixed three real implementation bugs along the way — see
    [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md)). This is exactly the kind of
    correction `ktflash`'s own CRC-32 scope needed before hardware caught it (payload-only vs.
-   header+payload) — same lesson, same payoff. Remaining unknowns needing more hardware time: the
-   save/commit opcode (needs a power-cycle test) and whether `seq_hi` is really part of the CRC
-   scope or just coincidentally zero so far (needs a session where `seq` wraps past 255).
+   header+payload) — same lesson, same payoff. `seq_hi`'s place in the CRC scope is now fully
+   settled too (driven `seq` past 255 with 260 real requests; five `seq_hi=0x01` replies all
+   confirm it). The save/commit opcode is confirmed as well: `cmd 0x19` payload `[0x03]` written
+   + saved, a real power cycle confirmed (device re-enumerated), band read back unchanged.
+   Firmware version's app-mismatch is resolved too (BCD, not decimal — see below). Only remaining
+   unknown from this session: master gain's `×2560` encoding is round-trip-confirmed but not
+   audio-confirmed.
 
-**This phase's exit criterion — met 2026-09-06**: real reads and a real write/read-back round
-trip against a JA11, matching §4's predictions once three implementation bugs were fixed (see
-`docs/HARDWARE-VALIDATION.md`). Phases 1-3 below can now be built with confidence rather than
-against untested static-RE guesses — though the save-opcode and CRC-scope-at-`seq_hi≠0` items
+**This phase's exit criterion — met 2026-09-06**: real reads, a real write/read-back round trip,
+and a real save/power-cycle/re-read round trip against a JA11, matching §4's predictions once
+implementation bugs were fixed (see `docs/HARDWARE-VALIDATION.md`). Phases 1-3 below can now be
+built with confidence rather than against untested static-RE guesses.
 above are still open.
 
 ---
@@ -153,13 +159,13 @@ transport layer (Phase 2) has something solid to sit on.
 6. ⏳ `ktctl state` — volume, sample-rate/format, firmware version, mic-detect, UAC mode (the
    "device state channel" opcodes from Phase 0's §4b: `0x02`/`0x09`/`0x0B`/`0x12`/`0x20`).
 7. ⏳ `ktctl uac <1|2>` — switch UAC 1.0/2.0 mode (`0x20`, read+write).
-8. ⏳ `ktctl peq save` — commit PEQ edits to the device's persistent storage. **Opcode
-   unresolved**: neither this project's own RE nor the Android app decompile found a distinct
-   save/commit command (band writes might already persist immediately, or there's a separate
-   commit step). Two external open-source drivers each claim one, but disagree: `cmd 0x19`
-   payload `[3]` (`fiiocontrol-oss`, marked JA11-working) vs. `cmd 0x18` payload `[1]`
-   (`glacier-eq`, JA11 marked `Testing`/unconfirmed). Needs hardware to settle — try
-   `fiiocontrol-oss`'s version first, it's the one claimed to work against a real unit.
+8. ✅ `ktctl peq save` — commit PEQ edits to the device's persistent storage. **Opcode confirmed
+   on real hardware, 2026-09-06**: `cmd 0x19` payload `[0x03]` (`fiiocontrol-oss`'s candidate).
+   Neither this project's own RE nor the Android app decompile ever found a distinct save/commit
+   command, and band writes do **not** auto-persist (confirmed: an earlier gain write reset to
+   `0 dB` after an unrelated power cycle) — so a real commit step genuinely exists, and this is
+   it. `--save-command 0x18` remains available (`glacier-eq`'s untested alternative) in case a
+   future firmware revision needs it, but `0x19`/`[0x03]` is the confirmed default.
 9. ⏳ Safety: refuse out-of-range values client-side (the device's own valid ranges aren't yet
    known — Phase 0/2 hardware validation should surface them).
 

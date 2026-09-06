@@ -176,14 +176,12 @@ impl FrameCodec {
     /// originally assumed from static RE alone. `magic`/`dir` (bytes 1-2) are
     /// excluded from the CRC entirely.
     ///
-    /// Residual gap: both hardware samples had `seq_hi == 0x00`, and a leading
-    /// zero byte is a mathematical no-op for this CRC (state stays 0 through a
-    /// 0x00 byte when the running CRC is already 0) — so these two samples
-    /// can't distinguish "starts at `seq_hi`" from "starts at `seq_lo`". This
-    /// picks the wider (`seq_hi`-inclusive) scope as the safe default, since it
-    /// is provably correct whenever `seq_hi == 0` regardless of which is
-    /// actually right; re-confirm once a session's `seq` counter has wrapped
-    /// past 255 and `seq_hi != 0x00` is observed on the wire.
+    /// **Fully confirmed 2026-09-06**: an initial pass with `seq_hi == 0x00` in
+    /// both samples couldn't distinguish "starts at `seq_hi`" from "starts at
+    /// `seq_lo`" (a leading zero byte is a no-op for this CRC). Driving `seq`
+    /// past 255 (`examples/seq_wrap_probe.rs`) produced five real replies with
+    /// `seq_hi == 0x01`; the `seq_hi`-inclusive scope matches all five, the
+    /// `seq_lo`-only alternative matches none. Settled.
     fn crc_scope(frame_wo_crc_term: &[u8]) -> &[u8] {
         // Skip lead(0)/magic(1)/dir(2); CRC covers seq_hi..=last payload byte.
         &frame_wo_crc_term[3..]

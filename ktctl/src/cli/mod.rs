@@ -37,6 +37,11 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "ENCODING")]
     pub gain_encoding: Option<String>,
 
+    /// Override the save/commit opcode: `0x19` (default) or `0x18`. Only a real
+    /// write -> save -> power-cycle -> re-read test can tell which one persists.
+    #[arg(long, global = true, value_name = "CMD")]
+    pub save_command: Option<String>,
+
     /// Subcommand to run; when omitted, the interactive TUI launches.
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -207,6 +212,15 @@ fn resolve_gain_encoding(cli: &Cli, cfg: &Config) -> Result<GainEncoding> {
     }
 }
 
+/// Resolve the effective save/commit opcode from the `--save-command` flag.
+fn resolve_save_command(cli: &Cli) -> Result<crate::proto::opcode::SaveCommand> {
+    match cli.save_command.as_deref() {
+        None => Ok(crate::proto::opcode::SaveCommand::default()),
+        Some(s) => crate::proto::opcode::SaveCommand::parse(s)
+            .ok_or_else(|| anyhow::anyhow!("unknown save command '{s}' (0x19 or 0x18)")),
+    }
+}
+
 /// Run against an explicitly-provided CLI (used by tests).
 pub fn dispatch(mut cli: Cli) -> Result<()> {
     let cfg = Config::load();
@@ -224,6 +238,7 @@ pub fn dispatch(mut cli: Cli) -> Result<()> {
     }
 
     let encoding = resolve_gain_encoding(&cli, &cfg)?;
+    let save_command = resolve_save_command(&cli)?;
 
     if cli.fake || cfg.default_fake {
         run_command(
@@ -231,6 +246,7 @@ pub fn dispatch(mut cli: Cli) -> Result<()> {
             &cli,
             Device::new(FakeDevice::new())
                 .with_gain_encoding(encoding)
+                .with_save_command(save_command)
                 .with_verbose(cli.verbose),
         )
     } else {
@@ -244,12 +260,13 @@ pub fn dispatch(mut cli: Cli) -> Result<()> {
                 &cli,
                 Device::new(transport)
                     .with_gain_encoding(encoding)
+                    .with_save_command(save_command)
                     .with_verbose(cli.verbose),
             )
         }
         #[cfg(not(feature = "usb"))]
         {
-            let _ = (&command, encoding);
+            let _ = (&command, encoding, save_command);
             anyhow::bail!("built without the `usb` feature; re-run with --fake");
         }
     }

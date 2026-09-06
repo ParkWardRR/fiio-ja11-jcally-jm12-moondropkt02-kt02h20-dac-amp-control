@@ -13,8 +13,8 @@ pub mod usb;
 
 use crate::proto::frame::{Direction, Frame, FrameCodec, FrameError};
 use crate::proto::opcode::{
-    CMD_FIRMWARE, CMD_GAIN, CMD_MIC_DETECT, CMD_PEQ_PRESET, CMD_SAMPLE_RATE, CMD_UAC_MODE,
-    CMD_VOLUME, SAVE_CANDIDATES,
+    SaveCommand, CMD_FIRMWARE, CMD_GAIN, CMD_MIC_DETECT, CMD_PEQ_PRESET, CMD_SAMPLE_RATE,
+    CMD_UAC_MODE, CMD_VOLUME,
 };
 use crate::proto::peq::{GainEncoding, PeqBand, PeqError, PeqState, PresetState, BAND_COUNT};
 use crate::proto::state::{firmware_version, sample_rate_label, DeviceState, UacMode};
@@ -94,16 +94,18 @@ pub struct Device<T: Transport> {
     transport: T,
     codec: FrameCodec,
     gain_encoding: GainEncoding,
+    save_command: SaveCommand,
     verbose: bool,
 }
 
 impl<T: Transport> Device<T> {
-    /// Wrap a transport in the protocol layer (default gain encoding).
+    /// Wrap a transport in the protocol layer (default gain encoding, default save command).
     pub fn new(transport: T) -> Self {
         Device {
             transport,
             codec: FrameCodec::new(),
             gain_encoding: GainEncoding::default(),
+            save_command: SaveCommand::default(),
             verbose: false,
         }
     }
@@ -111,6 +113,12 @@ impl<T: Transport> Device<T> {
     /// Override the master-gain (`0x17`) encoding (see [`GainEncoding`]).
     pub fn with_gain_encoding(mut self, encoding: GainEncoding) -> Self {
         self.gain_encoding = encoding;
+        self
+    }
+
+    /// Override the save/commit opcode (see [`SaveCommand`]).
+    pub fn with_save_command(mut self, cmd: SaveCommand) -> Self {
+        self.save_command = cmd;
         self
     }
 
@@ -285,21 +293,24 @@ impl<T: Transport> Device<T> {
         })
     }
 
-    /// Attempt to commit PEQ edits to persistent storage.
+    /// Commit PEQ edits to persistent storage, using whichever [`SaveCommand`]
+    /// this `Device` was built with (default: `SaveCommand::Cmd19Payload3`,
+    /// **confirmed to persist across a power cycle on real hardware**,
+    /// 2026-09-06 — see that variant's doc comment for the exact test).
     ///
-    /// The save opcode is unresolved (see [`SAVE_CANDIDATES`]); this tries each
-    /// candidate in order and returns the `(cmd, payload)` that first succeeded.
-    /// It's a best-effort convenience — hardware must confirm which is real.
+    /// This used to try both candidates in sequence and return whichever one
+    /// "succeeded" — but that only worked because a write to the wrong opcode
+    /// could time out and error. Real hardware showed this device never ACKs
+    /// writes on this channel at all (`docs/HARDWARE-VALIDATION.md` bug #3), so
+    /// *every* write now "succeeds" regardless of whether the device did
+    /// anything with it — a try-until-no-error loop can no longer tell the
+    /// candidates apart. The save command is therefore explicit and
+    /// CLI-selectable (`--save-command`) rather than auto-picked.
     pub fn save(&mut self) -> Result<(u8, Vec<u8>), DeviceError> {
-        let mut last_err = None;
-        for (cmd, payload) in SAVE_CANDIDATES {
-            let seq = self.codec.next_seq();
-            match self.exchange(Frame::write(seq, *cmd, payload.to_vec())) {
-                Ok(_) => return Ok((*cmd, payload.to_vec())),
-                Err(e) => last_err = Some(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| DeviceError::Io("no save candidates".into())))
+        let (cmd, payload) = self.save_command.to_frame_parts();
+        let seq = self.codec.next_seq();
+        self.exchange(Frame::write(seq, cmd, payload.clone()))?;
+        Ok((cmd, payload))
     }
 }
 

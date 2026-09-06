@@ -83,13 +83,20 @@ pub fn sample_rate_label(index: u8) -> &'static str {
 
 /// Decode a firmware-version payload (`"{major}.{minor}"`) from two bytes.
 ///
-/// Reported by `0x0B`. The Status screen shows e.g. `1.4`; note this may differ
-/// from the flashable firmware build string `ktflash` sees (`V2.2`) — an open
-/// discrepancy tracked in `docs/PROTOCOL.md`.
+/// Reported by `0x0B`. **Corrected 2026-09-06** against real hardware: the raw
+/// payload `02 14` was originally decoded byte-for-byte as `"2.20"`, but the
+/// Status screen shows `"1.4"` for the same device. `0x14`'s two nibbles are
+/// `1` and `4` — i.e. the *second* payload byte is BCD (`major` in the high
+/// nibble, `minor` in the low), not a plain decimal integer, and it alone is
+/// the user-facing version. The first byte (`0x02` here) decodes to something
+/// else — still unidentified, possibly a hardware/protocol revision distinct
+/// from the app-displayed firmware build; not exposed by this function.
+/// Separately, this may still differ from the flashable firmware build string
+/// `ktflash` sees (`V2.2`) — tracked in `docs/PROTOCOL.md`.
 pub fn firmware_version(payload: &[u8]) -> String {
     match payload {
-        [major, minor, ..] => format!("{major}.{minor}"),
-        [major] => format!("{major}.0"),
+        [_unidentified, ver, ..] => format!("{}.{}", ver >> 4, ver & 0x0F),
+        [ver] => format!("{}.{}", ver >> 4, ver & 0x0F),
         [] => "unknown".to_string(),
     }
 }
@@ -139,8 +146,12 @@ mod tests {
 
     #[test]
     fn firmware_formatting() {
-        assert_eq!(firmware_version(&[1, 4]), "1.4");
-        assert_eq!(firmware_version(&[2]), "2.0");
+        // Real hardware payload (2026-09-06): [0x02, 0x14] -> "1.4", matching
+        // the FIIO Control app's Status screen exactly. The second byte is
+        // BCD (high nibble = major, low nibble = minor); the first byte's
+        // meaning is still unidentified and isn't part of the version string.
+        assert_eq!(firmware_version(&[0x02, 0x14]), "1.4");
+        assert_eq!(firmware_version(&[0x14]), "1.4");
         assert_eq!(firmware_version(&[]), "unknown");
     }
 }
