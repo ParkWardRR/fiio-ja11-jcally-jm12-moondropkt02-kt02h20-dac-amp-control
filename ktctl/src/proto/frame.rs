@@ -167,11 +167,26 @@ impl FrameCodec {
     /// Bytes that the CRC is computed over, given the full serialized frame
     /// *without* the trailing crc+term (i.e. `&frame[LEAD..end_of_payload]`).
     ///
-    /// Centralised so the "magic-through-payload" scope can be corrected in one
-    /// place if hardware capture proves it wrong.
+    /// Centralised so the scope can be corrected in one place if hardware
+    /// disagrees — and it did: confirmed against a real JA11 (2026-09-06) by
+    /// brute-forcing every contiguous byte range against two independent,
+    /// device-computed reply CRCs (a `0x0B` firmware reply and a `0x16` preset
+    /// reply, different `cmd`/`len`/payload/seq). The scope that satisfies both
+    /// is `seq_hi..=last payload byte` — **not** `magic..=last payload byte` as
+    /// originally assumed from static RE alone. `magic`/`dir` (bytes 1-2) are
+    /// excluded from the CRC entirely.
+    ///
+    /// Residual gap: both hardware samples had `seq_hi == 0x00`, and a leading
+    /// zero byte is a mathematical no-op for this CRC (state stays 0 through a
+    /// 0x00 byte when the running CRC is already 0) — so these two samples
+    /// can't distinguish "starts at `seq_hi`" from "starts at `seq_lo`". This
+    /// picks the wider (`seq_hi`-inclusive) scope as the safe default, since it
+    /// is provably correct whenever `seq_hi == 0` regardless of which is
+    /// actually right; re-confirm once a session's `seq` counter has wrapped
+    /// past 255 and `seq_hi != 0x00` is observed on the wire.
     fn crc_scope(frame_wo_crc_term: &[u8]) -> &[u8] {
-        // Skip the leading 0x02; CRC covers magic..=last payload byte.
-        &frame_wo_crc_term[1..]
+        // Skip lead(0)/magic(1)/dir(2); CRC covers seq_hi..=last payload byte.
+        &frame_wo_crc_term[3..]
     }
 
     /// Serialize a [`Frame`] to its on-wire byte representation.
@@ -207,9 +222,15 @@ impl FrameCodec {
         let cmd = buf[5];
         let declared = buf[6] as usize;
 
-        // Full frame length implied by the declared payload length.
+        // Full frame length implied by the declared payload length. USB HID
+        // interrupt/bulk reads on real hardware return a fixed-size report
+        // (observed: 21 bytes) zero-padded past the meaningful frame, not a
+        // buffer trimmed to exactly the frame's own length — so accept any
+        // buffer *at least* this long and only look at its `expected_total`-byte
+        // prefix below. (Confirmed against a real JA11, 2026-09-06: a 2-byte
+        // `0x0B` version reply arrived in a 21-byte report.)
         let expected_total = MIN_FRAME_LEN + declared;
-        if buf.len() != expected_total {
+        if buf.len() < expected_total {
             return Err(FrameError::LengthMismatch {
                 declared,
                 buffer: buf.len(),
@@ -223,8 +244,9 @@ impl FrameCodec {
             return Err(FrameError::BadTerm(term));
         }
 
-        // CRC is over magic..=last payload byte, which is buf[1..7+declared].
-        let computed = crc8_maxim(&buf[1..7 + declared]);
+        // Use the same centralised scope `encode` uses (see `crc_scope`'s docs
+        // for why it's `seq_hi..=last payload byte`, not `magic..=...`).
+        let computed = crc8_maxim(Self::crc_scope(&buf[..7 + declared]));
         if computed != carried_crc {
             return Err(FrameError::CrcMismatch {
                 computed,

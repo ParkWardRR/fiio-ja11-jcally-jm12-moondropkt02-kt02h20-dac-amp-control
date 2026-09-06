@@ -46,8 +46,10 @@ fn write_band_frame_is_well_formed() {
     assert_eq!(&payload[5..7], &70i16.to_be_bytes()); // Q ×100, third
     assert_eq!(payload[7], 0x00); // peak
 
-    // CRC covers bytes[1..15] (magic through payload).
-    let expected_crc = crc8_maxim(&bytes[1..15]);
+    // CRC covers bytes[3..15] (seq_hi through payload) -- corrected 2026-09-06
+    // against a real JA11; magic/dir (bytes 1-2) are NOT covered. See
+    // `FrameCodec::crc_scope`'s doc comment for the hardware evidence.
+    let expected_crc = crc8_maxim(&bytes[3..15]);
     assert_eq!(bytes[15], expected_crc);
 }
 
@@ -58,9 +60,10 @@ fn full_frame_byte_exact_golden() {
     let frame = Frame::read(0x00FF, CMD_PEQ_BAND, vec![0x02]);
     let bytes = codec.encode(&frame);
 
-    // Recompute the whole thing explicitly and compare.
+    // Recompute the whole thing explicitly and compare. CRC scope is
+    // bytes[3..] (seq_hi onward) -- corrected 2026-09-06 against a real JA11.
     let mut expected = vec![0x02, 0xBB, 0x0B, 0x00, 0xFF, 0x15, 0x01, 0x02];
-    let crc = crc8_maxim(&expected[1..]);
+    let crc = crc8_maxim(&expected[3..]);
     expected.push(crc);
     expected.push(0xEE);
 

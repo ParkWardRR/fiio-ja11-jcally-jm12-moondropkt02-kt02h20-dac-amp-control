@@ -18,14 +18,19 @@ vendor utility for this particular channel to fall back on).
 
 > ## 📍 You are here
 >
-> **Phase 0's static RE is now complete**: frame format, opcodes, interface/endpoint discovery,
-> and the filter-type enum are all recovered from the FiiO Control Android app (v3.45.0 and
-> v4.0.0) — see
-> [ktflash's `research/android-app-re-findings.md` §4](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit/blob/main/research/android-app-re-findings.md)
-> for the full write-up this project is built on. **Nothing has been confirmed against real
-> hardware yet, and no code exists in this repo.** The frontier is now purely hardware
-> validation — a USB capture, or just trying it against a real JA11 — before writing Phase 1's
-> fixtures against possibly-wrong assumptions.
+> **First real-hardware session done, 2026-09-06 — core protocol confirmed.** Against a physical
+> JA11 (macOS host, passed through to an OrbStack Linux guest since `rusb` can't claim this
+> device's HID interface natively on macOS — the same wall `ktflash` already solved once for its
+> own CDC interface), found and fixed three real bugs: a too-strict reply-length check, a wrong
+> CRC-8 scope for replies (excludes `magic`/`dir`, confirmed byte-exact against two independent
+> device-computed CRCs), and writes timing out waiting for an ACK the device never sends. After
+> those fixes: reads, writes, and a PEQ band round-trip all work end-to-end on real silicon, and
+> the corrected per-band byte order is now confirmed *from the wire*, not just re-derived from
+> decompiled code. Full log: [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md).
+> Static RE background: [ktflash's `research/android-app-re-findings.md` §4](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit/blob/main/research/android-app-re-findings.md).
+> Still open: the save/commit opcode (needs a power-cycle test), and the exact firmware-version
+> semantics (the wire value doesn't match what the official app displays) — see the validation
+> log's "Open items."
 
 ---
 
@@ -53,18 +58,21 @@ Phase 5  Packaging + release (binaries, both platforms) ............... ⏳ plan
    against a claimed vendor interface — confirmed **not** the CDC-ACM serial port `ktflash`
    uses for firmware flashing (that's a different USB interface on the same device, used only
    during an OTA/bootloader session).
-3. ✅ **Frame format recovered**:
-   `02 <AA|BB> <0A|0B> <seq_hi> <seq_lo> <cmd> <len> <payload…> <crc8> EE`
-   — `AA 0A` write-frame magic, `BB 0B` read-frame magic, 16-bit big-endian free-running
-   sequence counter, single-byte opcode, single-byte payload length, **CRC-8/MAXIM**
-   (Dallas/Maxim 1-Wire, poly `0x31` reflected, init 0) over the frame from the magic byte
-   through the payload, fixed `0xEE` terminator.
-4. ✅ **Opcodes recovered** for the JA11 (internal product id `109`):
+3. ✅ **Frame format** — `02 <AA|BB> <0A|0B> <seq_hi> <seq_lo> <cmd> <len> <payload…> <crc8> EE`,
+   **hardware-confirmed 2026-09-06** byte-exact in both directions. `AA 0A` write-frame magic,
+   `BB 0B` read-frame magic, 16-bit big-endian free-running sequence counter, single-byte opcode,
+   single-byte payload length, **CRC-8/MAXIM** (Dallas/Maxim 1-Wire, poly `0x31` reflected,
+   init 0). **CRC scope corrected against real hardware**: covers `seq_hi..=last payload byte`,
+   **not** `magic..=last payload byte` as originally assumed from static RE — see
+   [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md) for the brute-force evidence.
+4. ✅ **Opcodes recovered** for the JA11 (internal product id `109`), **field order confirmed
+   from the wire** 2026-09-06 (band 0 read back `freq=1000 Hz`/`Q=0.70` exactly matching what was
+   written):
    | cmd | meaning | payload |
    |---|---|---|
-   | `0x15` | per-band PEQ get/set | `[index, gain×10dB (i16 BE), freq Hz (u16 BE), Q×100 (i16 BE), filterType]` — byte order corrected 2026-09-05, gain comes before freq/Q |
+   | `0x15` | per-band PEQ get/set | `[index, gain×10dB (i16 BE), freq Hz (u16 BE), Q×100 (i16 BE), filterType]` |
    | `0x16` | PEQ enable / active preset | `[value]`: `0`=Vocal, `1`=Classic, `2`=Bass, `3`=USER1 (custom), `4`=off — real names confirmed from FIIO's own WebHID site (not "Classic/Pop/Jazz", a different FIIO product's preset set) |
-   | `0x17` | master/global gain | **Unconfirmed encoding** — this repo's own static RE says `×10dB` big-endian, but two independent hardware-facing projects (`fiiocontrol-oss`, `glacier-eq`) both use `×2560` little-endian and agree with each other; treat `×2560`/LE as more likely correct pending a real JA11 |
+   | `0x17` | master/global gain | `×2560` little-endian — **strong hardware evidence** (write `-3.0 dB` → reads back `-2.9 dB`, a single quantization step off, not the order-of-magnitude mismatch `×10 be` would produce); not yet audio-confirmed |
 
    Plus, on a **separate frame-builder "channel"** used by the state tab (same wire format,
    different opcode namespace context — see the RE write-up §4b): `0x02` volume, `0x09`
@@ -80,17 +88,21 @@ Phase 5  Packaging + release (binaries, both platforms) ............... ⏳ plan
 6. ✅ **Filter-type enum resolved**: FIIO's shared PEQ UI defines 7 types (Peak, LowShelf,
    HighShelf, BandPass, LowPass, HighPass, AllPass), but the **JA11's own band-edit screen
    only offers 3** — so on a JA11, `filterType` is `0`=Peak, `1`=LowShelf, `2`=HighShelf.
-7. ⏳ **Hardware validation** (the actual frontier — everything else in Phase 0 is now static-
-   complete): confirm the frame format, opcodes, and field encodings against a **real JA11**,
-   ideally via a USB capture (Wireshark + `usbmon` on Linux) of the official Android app doing
-   one PEQ read and one PEQ write. Without this, Phase 1 risks building fixtures around a wrong
-   assumption the same way `ktflash`'s CRC-32 scope was initially mis-scoped (payload-only vs.
-   header+payload) before hardware caught it. Remaining unknowns to settle this way: whether
-   the leading `0x02` byte is load-bearing or an artifact of one specific code path, and the
-   exact byte range the CRC-8 covers.
+7. ✅ **Hardware validation — first pass done, 2026-09-06.** Against a real JA11 (via OrbStack,
+   since `rusb` can't claim the HID interface natively on macOS): confirmed the frame format,
+   the corrected CRC scope, the per-band field order, and that writes don't get an ACK (found and
+   fixed three real implementation bugs along the way — see
+   [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md)). This is exactly the kind of
+   correction `ktflash`'s own CRC-32 scope needed before hardware caught it (payload-only vs.
+   header+payload) — same lesson, same payoff. Remaining unknowns needing more hardware time: the
+   save/commit opcode (needs a power-cycle test) and whether `seq_hi` is really part of the CRC
+   scope or just coincidentally zero so far (needs a session where `seq` wraps past 255).
 
-**This phase's exit criterion**: one real read and one real write against a JA11, byte-compared
-against what §4 of the RE write-up predicts. Until then, everything below is provisional.
+**This phase's exit criterion — met 2026-09-06**: real reads and a real write/read-back round
+trip against a JA11, matching §4's predictions once three implementation bugs were fixed (see
+`docs/HARDWARE-VALIDATION.md`). Phases 1-3 below can now be built with confidence rather than
+against untested static-RE guesses — though the save-opcode and CRC-scope-at-`seq_hi≠0` items
+above are still open.
 
 ---
 

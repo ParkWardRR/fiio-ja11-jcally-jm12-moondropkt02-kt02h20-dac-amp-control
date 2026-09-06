@@ -13,8 +13,8 @@ phone dance required.**
   <img alt="License: Blue Oak 1.0.0" src="https://img.shields.io/badge/license-Blue%20Oak%201.0.0-1a73e8">
   <img alt="Rust" src="https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust&logoColor=white">
   <img alt="macOS + Linux" src="https://img.shields.io/badge/target-macOS%20%2B%20Linux-000?logo=apple&logoColor=white">
-  <img alt="Status: protocol reversed, unimplemented" src="https://img.shields.io/badge/status-protocol%20reversed%2C%20unimplemented-b60205">
-  <img alt="Hardware validation: not yet" src="https://img.shields.io/badge/hardware%20validation-not%20yet-b60205">
+  <img alt="Status: core protocol confirmed on hardware" src="https://img.shields.io/badge/status-core%20protocol%20confirmed%20on%20hardware-2ea44f">
+  <img alt="Hardware validation: first pass done 2026-09-06" src="https://img.shields.io/badge/hardware%20validation-first%20pass%20done-2ea44f">
 </p>
 
 </div>
@@ -45,12 +45,12 @@ bands, gain, presets — **without ever touching flash**.
 | 🗺️ **See the plan** | [ROADMAP.md](ROADMAP.md) |
 
 > [!IMPORTANT]
-> **This project is at the "protocol reversed, nothing built yet" stage.** Everything under
-> [ROADMAP.md](ROADMAP.md) Phase 1 onward is unimplemented. The protocol itself was recovered by
-> *static* reverse-engineering of the FiiO Control Android app (v3.45.0 and v4.0.0) — it has
-> **not been confirmed against real JA11 hardware**. Expect to find (and fix) wrong assumptions
-> once real hardware is in the loop — see [Phase 0](ROADMAP.md#phase-0--protocol-recovery-) for
-> exactly what's confirmed vs. inferred.
+> **The core protocol is now confirmed against a real JA11** (2026-09-06) — transport, frame
+> format, CRC, and per-band PEQ round-trip all work end-to-end on real hardware, after fixing
+> three bugs the static-RE-only implementation had (see
+> [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md)). Still open: the save/commit
+> opcode (needs a power-cycle test) and the exact firmware-version semantics — see
+> [Phase 0](ROADMAP.md#phase-0--protocol-recovery-) for the full confirmed-vs-open breakdown.
 
 > [!NOTE]
 > **Why not iOS?** Confirmed straight from FIIO's own support docs, not just platform
@@ -102,18 +102,23 @@ JA11-relevant code turned out to be plain, decompilable Java/Kotlin):
 - **Frame format**: `02 <AA|BB> <0A|0B> <seq_hi> <seq_lo> <cmd> <len> <payload…> <crc8> EE` —
   `AA 0A` = write, `BB 0B` = read/query, a 16-bit free-running sequence counter, a
   **CRC-8/MAXIM** (Dallas/Maxim 1-Wire) checksum, and a fixed `0xEE` terminator.
+  **Hardware-confirmed 2026-09-06** — see [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md).
+  The CRC scope was wrong in earlier static-RE-only passes of this doc: it's `seq_hi..=last
+  payload byte`, **not** `magic..=last payload byte` — `magic`/`dir` are excluded.
 - **Known opcodes**: `0x15` per-PEQ-band get/set (`index, gain ×10 dB, freq Hz, Q ×100, filter
-  type` — corrected byte order, see `research/android-app-re-findings.md` §4), `0x16` PEQ
-  enable / active preset (`0`=Vocal, `1`=Classic, `2`=Bass, `3`=USER1/custom, `4`=off — real
-  names now confirmed from FIIO's own WebHID site, see `research/webhid-control-findings.md`),
-  `0x17` master/global gain — **scale/endianness unconfirmed**: this doc's Android-only read
-  said `×10` big-endian, but two independent hardware-facing implementations
-  (`fiiocontrol-oss`, `glacier-eq`) both use `×2560` little-endian instead and agree with each
-  other; treat `×2560`/little-endian as more likely correct until a real JA11 settles it.
+  type` — byte order confirmed against real hardware, band 0 read back `freq=1000 Hz`/`Q=0.70`
+  exactly as written), `0x16` PEQ enable / active preset (`0`=Vocal, `1`=Classic, `2`=Bass,
+  `3`=USER1/custom, `4`=off — real names confirmed from FIIO's own WebHID site), `0x17`
+  master/global gain, `×2560` little-endian — strong hardware evidence (write `-3.0 dB` → reads
+  back `-2.9 dB`, a single quantization step off, not the order-of-magnitude mismatch the
+  alternative `×10 be` encoding would produce).
 - **Filter types**: the JA11 supports 3 of FIIO's 7 shared filter types —
   `0`=Peak, `1`=LowShelf, `2`=HighShelf.
-- **Not yet pinned down**: whether the leading `0x02` byte is strictly required, and the exact
-  byte range the CRC-8 covers — both need a real device or a USB capture to confirm.
+- **Writes don't get an ACK on this channel** — confirmed on hardware; `ktctl` no longer waits
+  for one (see `docs/HARDWARE-VALIDATION.md` bug #3).
+- **Not yet pinned down**: the save/commit-to-flash opcode (needs a power-cycle test to confirm
+  persistence) and whether the CRC scope truly starts at `seq_hi` or just `seq_lo` (both samples
+  so far had `seq_hi == 0`, which is indistinguishable from omitting it for this CRC).
 
 Full detail lives in `ktflash`'s
 [`research/android-app-re-findings.md`](https://github.com/ParkWardRR/fiio-ja11-jcally-jm12-moondropkt02-kt02h20-dac-amp-toolkit/blob/main/research/android-app-re-findings.md)

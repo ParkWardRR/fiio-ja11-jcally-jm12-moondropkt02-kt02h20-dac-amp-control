@@ -11,7 +11,7 @@ pub mod ids;
 #[cfg(feature = "usb")]
 pub mod usb;
 
-use crate::proto::frame::{Frame, FrameCodec, FrameError};
+use crate::proto::frame::{Direction, Frame, FrameCodec, FrameError};
 use crate::proto::opcode::{
     CMD_FIRMWARE, CMD_GAIN, CMD_MIC_DETECT, CMD_PEQ_PRESET, CMD_SAMPLE_RATE, CMD_UAC_MODE,
     CMD_VOLUME, SAVE_CANDIDATES,
@@ -23,6 +23,15 @@ use crate::proto::state::{firmware_version, sample_rate_label, DeviceState, UacM
 pub const JA11_VID: u16 = 0x2972;
 /// USB product id for the FiiO JA11 (from `ktflash`).
 pub const JA11_PID: u16 = 0x0102;
+
+/// Render bytes as a space-separated hex string, for `-v`/`--verbose` logging.
+fn hex_dump(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Errors from the transport / device layer.
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +68,21 @@ pub trait Transport {
     /// Send one encoded frame and return the raw reply bytes.
     fn transceive(&mut self, request: &[u8]) -> Result<Vec<u8>, DeviceError>;
 
+    /// Send a write-direction frame without waiting for a reply.
+    ///
+    /// Confirmed against a real JA11 (2026-09-06): the device does not ACK
+    /// writes on this channel — a `bulk IN` read after a write frame times out
+    /// even though the write demonstrably took effect (read back afterward with
+    /// a separate query). The reference `fiiocontrol-oss` WebHID driver agrees:
+    /// its writes use `sendReport()` alone, never a paired synchronous read.
+    /// Default implementation falls back to [`Transport::transceive`] and
+    /// discards the reply, for transports (like the fake/test device) that do
+    /// reply symmetrically; [`usb::UsbTransport`] overrides this to skip the
+    /// read entirely.
+    fn send_write(&mut self, request: &[u8]) -> Result<(), DeviceError> {
+        self.transceive(request).map(|_| ())
+    }
+
     /// A short human-readable identifier for logging (e.g. "fake" or a bus addr).
     fn describe(&self) -> String {
         "transport".to_string()
@@ -70,6 +94,7 @@ pub struct Device<T: Transport> {
     transport: T,
     codec: FrameCodec,
     gain_encoding: GainEncoding,
+    verbose: bool,
 }
 
 impl<T: Transport> Device<T> {
@@ -79,6 +104,7 @@ impl<T: Transport> Device<T> {
             transport,
             codec: FrameCodec::new(),
             gain_encoding: GainEncoding::default(),
+            verbose: false,
         }
     }
 
@@ -88,16 +114,43 @@ impl<T: Transport> Device<T> {
         self
     }
 
+    /// Print every request/reply frame's raw hex to stderr (`ktctl -v`).
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
     /// Access the underlying transport (for `describe`, tests, etc.).
     pub fn transport(&self) -> &T {
         &self.transport
     }
 
-    /// Encode a request frame, send it, and decode+validate the reply frame.
+    /// Encode a request frame, send it, and (for reads) decode+validate the
+    /// reply frame. Writes don't get a reply on real hardware (see
+    /// [`Transport::send_write`]) — for those, the returned `Frame` is a
+    /// synthetic empty-payload echo of the request, since no caller inspects a
+    /// write's "reply" contents (they only care whether it errored).
     fn exchange(&mut self, req: Frame) -> Result<Frame, DeviceError> {
         let expected_cmd = req.cmd;
+        let direction = req.direction;
+        let seq = req.seq;
         let bytes = self.codec.encode(&req);
+        if self.verbose {
+            eprintln!("[ktctl]  > {}", hex_dump(&bytes));
+        }
+        if direction == Direction::Write {
+            self.transport.send_write(&bytes)?;
+            return Ok(Frame {
+                direction,
+                seq,
+                cmd: expected_cmd,
+                payload: Vec::new(),
+            });
+        }
         let reply_bytes = self.transport.transceive(&bytes)?;
+        if self.verbose {
+            eprintln!("[ktctl]  < {}", hex_dump(&reply_bytes));
+        }
         let reply = self.codec.decode(&reply_bytes)?;
         if reply.cmd != expected_cmd {
             return Err(DeviceError::UnexpectedOpcode {

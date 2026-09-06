@@ -181,6 +181,17 @@ impl Transport for UsbTransport {
         Ok(buf)
     }
 
+    fn send_write(&mut self, request: &[u8]) -> Result<(), DeviceError> {
+        // No read_bulk here on purpose: the device doesn't ACK writes on this
+        // channel (confirmed on real hardware, see `Transport::send_write`'s
+        // doc comment) -- waiting for one just burns the full I/O timeout on
+        // every write for nothing.
+        self.handle
+            .write_bulk(self.ep_out, request, self.timeout)
+            .map_err(|e| DeviceError::Io(format!("bulk OUT failed: {e}")))?;
+        Ok(())
+    }
+
     fn describe(&self) -> String {
         format!(
             "USB JA11 bus {} addr {} iface {} (out {:#04x}/in {:#04x})",

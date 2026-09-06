@@ -229,7 +229,9 @@ pub fn dispatch(mut cli: Cli) -> Result<()> {
         run_command(
             &command,
             &cli,
-            Device::new(FakeDevice::new()).with_gain_encoding(encoding),
+            Device::new(FakeDevice::new())
+                .with_gain_encoding(encoding)
+                .with_verbose(cli.verbose),
         )
     } else {
         #[cfg(feature = "usb")]
@@ -240,7 +242,9 @@ pub fn dispatch(mut cli: Cli) -> Result<()> {
             run_command(
                 &command,
                 &cli,
-                Device::new(transport).with_gain_encoding(encoding),
+                Device::new(transport)
+                    .with_gain_encoding(encoding)
+                    .with_verbose(cli.verbose),
             )
         }
         #[cfg(not(feature = "usb"))]
