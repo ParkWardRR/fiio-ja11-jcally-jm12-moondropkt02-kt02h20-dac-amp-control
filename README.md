@@ -20,9 +20,15 @@ A native Rust **CLI + TUI** that speaks the JA11's runtime USB control protocol 
 
 ## The interactive TUI
 
-Run `ktctl` with no arguments for a live EQ editor — arrow keys to select and shape each band, `w` to write.
+Run `ktctl` with no arguments for a two-tab live dashboard — `Status` and `EQ`, mirroring the
+official FiiO Control app's own tab structure (its third tab, "Guide", is just static help text
+and isn't reproduced here). `Tab` switches views; arrow keys navigate and edit within each.
+Visual theme matches `ktflash`'s TUI on purpose, so the two tools feel like a matched pair.
 
 ![ktctl TUI: a live 5-band EQ bar chart with keyboard editing](docs/media/tui.gif)
+
+> The recording above predates the two-tab redesign — regenerate with `vhs docs/media/tui.tape`
+> once the `.tape` script is updated to show both views (see "How to help").
 
 ## The CLI
 
@@ -112,13 +118,28 @@ ktctl -v probe                                    # dump raw USB frames
 
 ### TUI keys
 
+`Tab` / `1` / `2` switch between the two views; `q` / `Esc` quits from either.
+
+**Status view** — read-only device info plus two settings that apply immediately (no "unsaved"
+step, matching the app's own Status screen):
+
+| Key | Action |
+|---|---|
+| `↑` `↓` / `k` `j` | Volume ±1 (applied immediately) |
+| `u` | Toggle UAC 1.0 / 2.0 (applied immediately) |
+| `r` | Refresh from the device |
+
+**EQ view** — edits stage locally until `w`:
+
 | Key | Action | Key | Action |
 |---|---|---|---|
 | `←` `→` / `h` `l` | Select band | `p` | Cycle preset |
 | `↑` `↓` / `k` `j` | Gain ±0.5 dB | `w` | Write to device |
-| `[` `]` | Frequency | `q` / `Esc` | Quit |
+| `[` `]` | Frequency | `s` | Save (commit to persistent storage) |
+| `,` `.` | Q | `r` | Reload from device (discards unsaved edits) |
+| `t` | Cycle filter type | | |
 
-Edits are staged locally until you press `w`. The TUI uses the same device layer as the CLI, so `--fake` works here too.
+The TUI uses the same device layer as the CLI, so `--fake` works here too.
 
 ---
 

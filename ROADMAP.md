@@ -165,17 +165,27 @@ All implemented in `ktctl/src/cli/`, confirmed against real hardware this sessio
 
 ---
 
-## Phase 4 — TUI: live dashboard ✅ *(built, simulator-tested; not yet hardware-driven end-to-end)*
+## Phase 4 — TUI: live dashboard ✅ *(two-tab redesign, feature-parity with the app)*
 
-`ktctl/src/tui/` — `ratatui`-based live view:
+`ktctl/src/tui/` — `ratatui`-based, two tabs (`Tab`/`1`/`2` to switch), mirroring the official
+FiiO Control app's own Status/EQ tab structure (its third tab, "Guide", is static help text and
+isn't reproduced). Firmware flashing stays out of scope on purpose — that's `ktflash`'s job.
 
-1. ✅ Live view of all 5 bands as an EQ response curve, gain, active preset.
-2. ✅ Interactive band editing (arrow keys / number entry) with a live-updating curve —
-   edits stage locally until `w` writes them.
-3. ✅ Preset cycling from the TUI.
-4. ⏳ A full hardware-driven TUI session (not just individual CLI commands) hasn't been run yet
-   this session — the underlying `Device` layer is the same as the CLI's, so this is expected to
-   work, but isn't independently confirmed.
+1. ✅ **Status tab**: firmware version, sample rate, in-line mic detect (read-only, matches the
+   app — it's hardware-sensed, not user-togglable), UAC 1.0/2.0 toggle (`u`, applied immediately),
+   device volume with a live gauge (`↑`/`↓`, applied immediately). Both writes go straight to the
+   device, matching the app's own Status screen having no separate "save" step for these.
+2. ✅ **EQ tab**: live view of all 5 bands as a response curve, gain, active preset; interactive
+   band editing (freq/gain/Q/filter type) staged locally until `w` writes them; `s` commits
+   (`peq save`) to persistent storage — the confirmed `cmd 0x19` opcode from Phase 0/3.
+3. ✅ Visual theme intentionally matches `ktflash`'s TUI (`flasher/src/tui.rs`'s exact
+   `ACCENT`/`GREEN`/`AMBER`/`RED`/`DIM`/`FG` palette) so the two tools read as a matched pair
+   despite being separate binaries with separate scopes.
+4. ✅ Smoke-tested against real hardware directly on macOS (launches, connects, quits cleanly) —
+   the underlying `Device` calls (`get_device_state`, `set_volume`, `set_uac`) were already
+   hardware-confirmed via the CLI, and the TUI just wires the same calls to keypresses.
+5. ⏳ The demo GIF (`docs/media/tui.gif`) predates this redesign and needs regenerating with
+   `vhs` once `docs/media/tui.tape` is updated to show both tabs.
 
 ---
 
