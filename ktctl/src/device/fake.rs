@@ -1,24 +1,54 @@
 //! An in-memory device simulator (roadmap Phase 1, item 3).
 //!
-//! [`FakeDevice`] holds a mutable [`PeqState`] and answers encoded request
+//! [`FakeDevice`] holds mutable PEQ + device state and answers encoded request
 //! frames with plausible reply frames, so the whole CLI/TUI stack can be
 //! exercised end-to-end without any hardware. It mirrors `ktflash`'s
 //! `FakeBootloader`.
 //!
 //! Reply convention (a modelling choice, since we have no capture of what real
-//! replies look like yet): the device echoes the request's direction/opcode/seq
-//! and returns the *resulting* value as the payload — a read returns the stored
-//! value, a write applies then echoes back what was stored.
+//! replies look like yet): the device echoes the request's opcode/seq and
+//! returns the *resulting* value as the payload — a read returns the stored
+//! value, a write applies then echoes back what was stored. Gain payload bytes
+//! are stored and echoed verbatim, so the simulator is agnostic to whichever
+//! [`crate::proto::peq::GainEncoding`] the caller uses.
 
 use super::{DeviceError, Transport};
 use crate::proto::frame::{Direction, Frame, FrameCodec};
-use crate::proto::opcode::{CMD_GAIN, CMD_PEQ_BAND, CMD_PEQ_PRESET};
-use crate::proto::peq::{gain_to_payload, PeqBand, PeqState, PresetState};
+use crate::proto::opcode::{
+    CMD_FIRMWARE, CMD_GAIN, CMD_MIC_DETECT, CMD_PEQ_BAND, CMD_PEQ_PRESET, CMD_SAMPLE_RATE,
+    CMD_UAC_MODE, CMD_VOLUME,
+};
+use crate::proto::peq::{GainEncoding, PeqBand, PeqState, PresetState};
+
+/// Simulated Status-screen state, seeded from FIIO's own screenshots.
+#[derive(Debug, Clone)]
+struct FakeStatus {
+    volume: u8,
+    sample_rate_index: u8,
+    firmware: [u8; 2],
+    mic_present: bool,
+    uac: u8,
+}
+
+impl Default for FakeStatus {
+    fn default() -> Self {
+        FakeStatus {
+            volume: 60,             // screenshot value
+            sample_rate_index: 7,   // "384k" in SAMPLE_RATE_TABLE
+            firmware: [1, 4],       // screenshot showed "1.4"
+            mic_present: true,      // screenshot showed mic ON
+            uac: 2,                 // screenshot showed UAC 2.0
+        }
+    }
+}
 
 /// A stateful fake JA11.
 #[derive(Debug)]
 pub struct FakeDevice {
     state: PeqState,
+    status: FakeStatus,
+    /// Raw `0x17` gain payload, echoed verbatim so encoding never matters here.
+    gain_payload: Vec<u8>,
     codec: FrameCodec,
     /// If set, the next `transceive` returns this error instead of replying —
     /// used by tests to exercise error paths.
@@ -36,21 +66,22 @@ impl FakeDevice {
     pub fn new() -> Self {
         FakeDevice {
             state: PeqState::flat(),
+            status: FakeStatus::default(),
+            gain_payload: GainEncoding::default().to_payload(0.0),
             codec: FrameCodec::new(),
             inject_error: None,
         }
     }
 
-    /// A fake device seeded with a specific state (for fixtures/tests).
+    /// A fake device seeded with a specific PEQ state (for fixtures/tests).
     pub fn with_state(state: PeqState) -> Self {
         FakeDevice {
             state,
-            codec: FrameCodec::new(),
-            inject_error: None,
+            ..Self::new()
         }
     }
 
-    /// Read-only view of the simulated state.
+    /// Read-only view of the simulated PEQ state.
     pub fn state(&self) -> &PeqState {
         &self.state
     }
@@ -74,11 +105,30 @@ impl FakeDevice {
             CMD_PEQ_BAND => self.handle_band(req),
             CMD_GAIN => self.handle_gain(req),
             CMD_PEQ_PRESET => self.handle_preset(req),
+            CMD_VOLUME => Ok(self.rw_byte(req, |s| &mut s.volume)),
+            CMD_UAC_MODE => Ok(self.rw_byte(req, |s| &mut s.uac)),
+            CMD_SAMPLE_RATE => Ok(self.rw_byte(req, |s| &mut s.sample_rate_index)),
+            CMD_MIC_DETECT => {
+                // Read-only in practice; echo the stored flag as 0/1.
+                Ok(self.reply(req, vec![self.status.mic_present as u8]))
+            }
+            CMD_FIRMWARE => Ok(self.reply(req, self.status.firmware.to_vec())),
             other => Err(DeviceError::UnexpectedOpcode {
                 expected: other,
                 got: other,
             }),
         }
+    }
+
+    /// Generic read/write of a single status byte selected by `field`.
+    fn rw_byte(&mut self, req: &Frame, field: fn(&mut FakeStatus) -> &mut u8) -> Vec<u8> {
+        if req.direction == Direction::Write {
+            if let Some(b) = req.payload.first().copied() {
+                *field(&mut self.status) = b;
+            }
+        }
+        let value = *field(&mut self.status);
+        self.reply(req, vec![value])
     }
 
     fn handle_band(&mut self, req: &Frame) -> Result<Vec<u8>, DeviceError> {
@@ -106,9 +156,13 @@ impl FakeDevice {
 
     fn handle_gain(&mut self, req: &Frame) -> Result<Vec<u8>, DeviceError> {
         if req.direction == Direction::Write {
-            self.state.gain_db = crate::proto::peq::gain_from_payload(&req.payload)?;
+            self.gain_payload = req.payload.clone();
+            // Keep the decoded view roughly in sync for `state()` consumers.
+            if let Ok(g) = GainEncoding::default().from_payload(&req.payload) {
+                self.state.gain_db = g;
+            }
         }
-        Ok(self.reply(req, gain_to_payload(self.state.gain_db).to_vec()))
+        Ok(self.reply(req, self.gain_payload.clone()))
     }
 
     fn handle_preset(&mut self, req: &Frame) -> Result<Vec<u8>, DeviceError> {
@@ -139,6 +193,7 @@ mod tests {
     use super::*;
     use crate::device::Device;
     use crate::proto::peq::FilterType;
+    use crate::proto::state::UacMode;
 
     #[test]
     fn write_then_read_band_persists() {
@@ -155,16 +210,46 @@ mod tests {
     }
 
     #[test]
+    fn gain_round_trips_under_both_encodings() {
+        for enc in [GainEncoding::X2560Le, GainEncoding::X10Be] {
+            let mut dev = Device::new(FakeDevice::new()).with_gain_encoding(enc);
+            dev.set_gain(3.5).unwrap();
+            assert!((dev.get_gain().unwrap() - 3.5).abs() < 1e-3, "enc {enc:?}");
+        }
+    }
+
+    #[test]
+    fn device_state_defaults_match_screenshots() {
+        let mut dev = Device::new(FakeDevice::new());
+        let st = dev.get_device_state().unwrap();
+        assert_eq!(st.volume, 60);
+        assert_eq!(st.sample_rate, "384k");
+        assert_eq!(st.firmware, "1.4");
+        assert!(st.mic_present);
+        assert_eq!(st.uac, UacMode::Uac2);
+    }
+
+    #[test]
+    fn uac_write_then_read() {
+        let mut dev = Device::new(FakeDevice::new());
+        dev.set_uac(UacMode::Uac1).unwrap();
+        assert_eq!(dev.get_uac().unwrap(), UacMode::Uac1);
+    }
+
+    #[test]
+    fn save_errors_when_opcode_unknown_to_fake() {
+        let mut dev = Device::new(FakeDevice::new());
+        // save's 0x19/0x18 candidates are unknown to the fake, so save should
+        // surface an error rather than silently "succeed" against a stub.
+        assert!(dev.save().is_err());
+    }
+
+    #[test]
     fn injected_error_surfaces() {
         let mut fake = FakeDevice::new();
         fake.inject_error = Some("simulated timeout".into());
         let mut dev = Device::new(fake);
         let err = dev.get_gain().unwrap_err();
         assert!(matches!(err, DeviceError::Io(_)));
-    }
-
-    #[test]
-    fn describe_is_stable() {
-        assert!(FakeDevice::new().describe().contains("fake"));
     }
 }

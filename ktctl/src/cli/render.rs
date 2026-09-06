@@ -1,6 +1,19 @@
 //! Human-readable rendering of PEQ state for the CLI.
 
 use crate::proto::peq::{PeqBand, PeqState};
+use crate::proto::state::DeviceState;
+
+/// Print the device Status-screen snapshot.
+pub fn print_device_state(s: &DeviceState) {
+    println!("volume:      {}", s.volume);
+    println!(
+        "sample rate: {} (index {})",
+        s.sample_rate, s.sample_rate_index
+    );
+    println!("firmware:    {}", s.firmware);
+    println!("mic:         {}", if s.mic_present { "present" } else { "absent" });
+    println!("UAC mode:    {}", s.uac);
+}
 
 /// Print a full PEQ snapshot as an aligned table plus a small ASCII curve.
 pub fn print_state(state: &PeqState) {

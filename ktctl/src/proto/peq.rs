@@ -1,15 +1,18 @@
 //! PEQ band model and its fixed-point wire encoding.
 //!
-//! The `0x15` payload recovered in Phase 0 is:
+//! The `0x15` payload recovered in Phase 0 (byte order **corrected 2026-09-05** —
+//! gain comes before freq/Q) is 8 bytes:
 //!
 //! ```text
-//! [ index, Q×100 (i16 BE), gain×10 dB (i16 BE), freq Hz (u16 BE), filterType ]
+//! [ index, gain×10 dB (i16 BE), freq Hz (u16 BE), Q×100 (i16 BE), filterType ]
 //! ```
 //!
-//! That is **7 bytes**: 1 (index) + 2 (Q) + 2 (gain) + 2 (freq) + ... wait —
-//! the recovered layout carries `filterType` as a trailing byte, giving 8 bytes
-//! total. Scaling: gain `×10`, Q `×100`, freq plain Hz. All still provisional
-//! (roadmap Phase 0 / `docs/PROTOCOL.md`).
+//! Scaling: gain `×10`, Q `×100`, freq plain Hz. Filter type on the JA11 is one
+//! of three of FIIO's seven shared types (`0`=Peak, `1`=LowShelf, `2`=HighShelf).
+//!
+//! The master-gain (`0x17`) encoding is genuinely ambiguous and is modelled by
+//! [`GainEncoding`]; see its docs. All still provisional (roadmap Phase 0 /
+//! `docs/PROTOCOL.md`).
 
 use serde::{Deserialize, Serialize};
 
@@ -22,19 +25,19 @@ pub const BAND_COUNT: usize = 5;
 /// Number of payload bytes in a `0x15` band record.
 pub const BAND_PAYLOAD_LEN: usize = 8;
 
-/// Biquad filter type. Enum meanings are **inferred** — the real mapping is an
-/// open Phase 0 question, so [`FilterType::Unknown`] preserves any byte we
-/// don't recognise for lossless round-tripping.
+/// Biquad filter type. The JA11's band-edit screen offers only the first three
+/// of FIIO's seven shared types; [`FilterType::Unknown`] preserves any other
+/// byte for lossless round-tripping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FilterType {
-    /// Peaking / bell filter (the default and most common PEQ band).
-    Peaking,
-    /// Low-shelf filter.
+    /// Peak / bell filter (`0`) — the default and most common PEQ band.
+    Peak,
+    /// Low-shelf filter (`1`).
     LowShelf,
-    /// High-shelf filter.
+    /// High-shelf filter (`2`).
     HighShelf,
-    /// A filter-type byte we have not yet mapped; carries the raw value.
+    /// A filter-type byte the JA11 UI doesn't offer; carries the raw value.
     Unknown(u8),
 }
 
@@ -42,7 +45,7 @@ impl FilterType {
     /// Encode to the trailing wire byte.
     pub fn to_byte(self) -> u8 {
         match self {
-            FilterType::Peaking => 0x00,
+            FilterType::Peak => 0x00,
             FilterType::LowShelf => 0x01,
             FilterType::HighShelf => 0x02,
             FilterType::Unknown(b) => b,
@@ -52,18 +55,17 @@ impl FilterType {
     /// Decode from the trailing wire byte.
     pub fn from_byte(b: u8) -> Self {
         match b {
-            0x00 => FilterType::Peaking,
+            0x00 => FilterType::Peak,
             0x01 => FilterType::LowShelf,
             0x02 => FilterType::HighShelf,
             other => FilterType::Unknown(other),
         }
     }
 
-    /// Parse from a CLI string (`peaking`, `low-shelf`, `high-shelf`, or a raw
-    /// integer for the unknown case).
+    /// Parse from a CLI string (`peak`, `low-shelf`, `high-shelf`, or a raw int).
     pub fn parse(s: &str) -> Result<Self, String> {
         match s.to_ascii_lowercase().replace('_', "-").as_str() {
-            "peaking" | "peak" | "pk" => Ok(FilterType::Peaking),
+            "peak" | "peaking" | "pk" => Ok(FilterType::Peak),
             "low-shelf" | "lowshelf" | "ls" => Ok(FilterType::LowShelf),
             "high-shelf" | "highshelf" | "hs" => Ok(FilterType::HighShelf),
             other => other
@@ -77,7 +79,7 @@ impl FilterType {
 impl std::fmt::Display for FilterType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FilterType::Peaking => write!(f, "peaking"),
+            FilterType::Peak => write!(f, "peak"),
             FilterType::LowShelf => write!(f, "low-shelf"),
             FilterType::HighShelf => write!(f, "high-shelf"),
             FilterType::Unknown(b) => write!(f, "unknown({b:#04x})"),
@@ -108,19 +110,20 @@ impl PeqBand {
             freq_hz: default_freq_for_band(index),
             gain_db: 0.0,
             q: 1.0,
-            filter: FilterType::Peaking,
+            filter: FilterType::Peak,
         }
     }
 
-    /// Serialize this band to the 8-byte `0x15` payload.
+    /// Serialize this band to the 8-byte `0x15` payload
+    /// (`index, gain×10 BE, freq BE, Q×100 BE, filter`).
     pub fn to_payload(&self) -> [u8; BAND_PAYLOAD_LEN] {
-        let q_fixed = (self.q * 100.0).round() as i16;
         let gain_fixed = (self.gain_db * 10.0).round() as i16;
+        let q_fixed = (self.q * 100.0).round() as i16;
         let mut out = [0u8; BAND_PAYLOAD_LEN];
         out[0] = self.index;
-        out[1..3].copy_from_slice(&q_fixed.to_be_bytes());
-        out[3..5].copy_from_slice(&gain_fixed.to_be_bytes());
-        out[5..7].copy_from_slice(&self.freq_hz.to_be_bytes());
+        out[1..3].copy_from_slice(&gain_fixed.to_be_bytes());
+        out[3..5].copy_from_slice(&self.freq_hz.to_be_bytes());
+        out[5..7].copy_from_slice(&q_fixed.to_be_bytes());
         out[7] = self.filter.to_byte();
         out
     }
@@ -134,9 +137,9 @@ impl PeqBand {
             });
         }
         let index = p[0];
-        let q_fixed = i16::from_be_bytes([p[1], p[2]]);
-        let gain_fixed = i16::from_be_bytes([p[3], p[4]]);
-        let freq_hz = u16::from_be_bytes([p[5], p[6]]);
+        let gain_fixed = i16::from_be_bytes([p[1], p[2]]);
+        let freq_hz = u16::from_be_bytes([p[3], p[4]]);
+        let q_fixed = i16::from_be_bytes([p[5], p[6]]);
         let filter = FilterType::from_byte(p[7]);
         Ok(PeqBand {
             index,
@@ -161,7 +164,7 @@ impl PeqBand {
 /// Errors from PEQ (de)serialization.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PeqError {
-    /// Payload length did not match [`BAND_PAYLOAD_LEN`].
+    /// Payload length did not match what the opcode expects.
     #[error("bad PEQ payload length: got {got}, want {want}")]
     BadPayloadLen {
         /// Length received.
@@ -179,14 +182,21 @@ pub enum PeqError {
 
 /// PEQ preset / enable state carried by opcode `0x16`.
 ///
-/// Values `0..=3` select a preset slot; `4` means PEQ off (inferred). Any other
-/// byte is preserved as [`PresetState::Raw`].
+/// Names confirmed from FIIO's own WebHID site: `0`=Vocal, `1`=Classic,
+/// `2`=Bass, `3`=USER1 (custom), `4`=off. Any other byte is preserved as
+/// [`PresetState::Raw`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PresetState {
-    /// Active preset slot 0..=3.
-    Slot(u8),
-    /// PEQ disabled.
+    /// Vocal preset (`0`).
+    Vocal,
+    /// Classic preset (`1`).
+    Classic,
+    /// Bass preset (`2`).
+    Bass,
+    /// USER1 / custom preset (`3`).
+    User1,
+    /// PEQ disabled (`4`).
     Off,
     /// An unrecognised state byte.
     Raw(u8),
@@ -196,7 +206,10 @@ impl PresetState {
     /// Encode to the single `0x16` payload byte.
     pub fn to_byte(self) -> u8 {
         match self {
-            PresetState::Slot(n) => n,
+            PresetState::Vocal => 0,
+            PresetState::Classic => 1,
+            PresetState::Bass => 2,
+            PresetState::User1 => 3,
             PresetState::Off => 4,
             PresetState::Raw(b) => b,
         }
@@ -205,21 +218,27 @@ impl PresetState {
     /// Decode from the single `0x16` payload byte.
     pub fn from_byte(b: u8) -> Self {
         match b {
-            0..=3 => PresetState::Slot(b),
+            0 => PresetState::Vocal,
+            1 => PresetState::Classic,
+            2 => PresetState::Bass,
+            3 => PresetState::User1,
             4 => PresetState::Off,
             other => PresetState::Raw(other),
         }
     }
 
-    /// Parse from a CLI string (`0`..`3` or `off`).
+    /// Parse from a CLI string: a name (`vocal`/`classic`/`bass`/`user1`/`off`)
+    /// or a numeric slot `0`-`4`.
     pub fn parse(s: &str) -> Result<Self, String> {
-        if s.eq_ignore_ascii_case("off") {
-            return Ok(PresetState::Off);
-        }
-        match s.parse::<u8>() {
-            Ok(n @ 0..=3) => Ok(PresetState::Slot(n)),
-            Ok(n) => Err(format!("preset slot {n} out of range (0-3, or 'off')")),
-            Err(_) => Err(format!("invalid preset '{s}' (expected 0-3 or 'off')")),
+        match s.to_ascii_lowercase().as_str() {
+            "vocal" | "0" => Ok(PresetState::Vocal),
+            "classic" | "1" => Ok(PresetState::Classic),
+            "bass" | "2" => Ok(PresetState::Bass),
+            "user1" | "user" | "custom" | "3" => Ok(PresetState::User1),
+            "off" | "4" => Ok(PresetState::Off),
+            other => Err(format!(
+                "invalid preset '{other}' (vocal/classic/bass/user1/off or 0-4)"
+            )),
         }
     }
 }
@@ -227,10 +246,63 @@ impl PresetState {
 impl std::fmt::Display for PresetState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PresetState::Slot(n) => write!(f, "slot {n}"),
+            PresetState::Vocal => write!(f, "vocal"),
+            PresetState::Classic => write!(f, "classic"),
+            PresetState::Bass => write!(f, "bass"),
+            PresetState::User1 => write!(f, "user1"),
             PresetState::Off => write!(f, "off"),
             PresetState::Raw(b) => write!(f, "raw({b:#04x})"),
         }
+    }
+}
+
+/// Encoding of the master-gain (`0x17`) value.
+///
+/// This is genuinely unresolved: this project's own Android-only static RE read
+/// `×10` big-endian, but two independent hardware-facing drivers
+/// (`fiiocontrol-oss`, `glacier-eq`) both use `×2560` little-endian and agree
+/// with each other — so [`GainEncoding::X2560Le`] is the default until a real
+/// JA11 settles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GainEncoding {
+    /// `gain×2560` as a little-endian i16 (two hardware drivers agree; default).
+    #[default]
+    X2560Le,
+    /// `gain×10` as a big-endian i16 (this project's original static RE).
+    X10Be,
+}
+
+impl GainEncoding {
+    /// Encode a master-gain value in dB to the `0x17` payload bytes.
+    ///
+    /// The fixed-point product is clamped to the `i16` range so out-of-range
+    /// input can never panic on the cast.
+    pub fn to_payload(self, gain_db: f32) -> Vec<u8> {
+        match self {
+            GainEncoding::X2560Le => {
+                let v = (gain_db * 2560.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                v.to_le_bytes().to_vec()
+            }
+            GainEncoding::X10Be => {
+                let v = (gain_db * 10.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                v.to_be_bytes().to_vec()
+            }
+        }
+    }
+
+    /// Decode a master-gain value in dB from the `0x17` payload bytes.
+    pub fn from_payload(self, p: &[u8]) -> Result<f32, PeqError> {
+        if p.len() != 2 {
+            return Err(PeqError::BadPayloadLen {
+                got: p.len(),
+                want: 2,
+            });
+        }
+        Ok(match self {
+            GainEncoding::X2560Le => i16::from_le_bytes([p[0], p[1]]) as f32 / 2560.0,
+            GainEncoding::X10Be => i16::from_be_bytes([p[0], p[1]]) as f32 / 10.0,
+        })
     }
 }
 
@@ -239,48 +311,32 @@ impl std::fmt::Display for PresetState {
 pub struct PeqState {
     /// The five PEQ bands.
     pub bands: Vec<PeqBand>,
-    /// Global / makeup gain in dB.
+    /// Master / makeup gain in dB.
     pub gain_db: f32,
     /// Active preset / enable state.
     pub preset: PresetState,
 }
 
 impl PeqState {
-    /// A flat default snapshot (all bands 0 dB, gain 0, preset slot 0).
+    /// A flat default snapshot (all bands 0 dB, gain 0, USER1 preset).
     pub fn flat() -> Self {
         PeqState {
             bands: (0..BAND_COUNT as u8).map(PeqBand::flat).collect(),
             gain_db: 0.0,
-            preset: PresetState::Slot(0),
+            preset: PresetState::User1,
         }
     }
 }
 
-/// Encode a global-gain value to the `0x17` payload (i16 BE, `×10` dB).
-pub fn gain_to_payload(gain_db: f32) -> [u8; 2] {
-    ((gain_db * 10.0).round() as i16).to_be_bytes()
-}
-
-/// Decode a global-gain value from the `0x17` payload.
-pub fn gain_from_payload(p: &[u8]) -> Result<f32, PeqError> {
-    if p.len() != 2 {
-        return Err(PeqError::BadPayloadLen {
-            got: p.len(),
-            want: 2,
-        });
-    }
-    Ok(i16::from_be_bytes([p[0], p[1]]) as f32 / 10.0)
-}
-
-/// Reasonable default centre frequencies spread across the band, used only for
-/// display defaults / the fake device — not a claim about hardware defaults.
+/// Real JA11 default centre frequencies, taken from FIIO's own EQ-screen
+/// screenshots (`29 / 81 / 600 / 7460 / 15660 Hz`).
 fn default_freq_for_band(index: u8) -> u16 {
     match index {
-        0 => 31,
-        1 => 125,
-        2 => 500,
-        3 => 2000,
-        4 => 8000,
+        0 => 29,
+        1 => 81,
+        2 => 600,
+        3 => 7460,
+        4 => 15660,
         _ => 1000,
     }
 }
@@ -296,32 +352,30 @@ mod tests {
             freq_hz: 1000,
             gain_db: -3.5,
             q: 0.71,
-            filter: FilterType::Peaking,
+            filter: FilterType::Peak,
         };
         let p = b.to_payload();
         assert_eq!(p.len(), BAND_PAYLOAD_LEN);
         let back = PeqBand::from_payload(&p).unwrap();
-        assert_eq!(back.index, 2);
-        assert_eq!(back.freq_hz, 1000);
-        assert!((back.gain_db - (-3.5)).abs() < 1e-6);
-        assert!((back.q - 0.71).abs() < 1e-6);
-        assert_eq!(back.filter, FilterType::Peaking);
+        assert_eq!(back, b);
     }
 
     #[test]
-    fn negative_gain_and_q_encode_as_signed() {
+    fn band_payload_field_order_is_gain_freq_q() {
+        // gain -3.0 → -30 (BE), freq 1000, Q 0.7 → 70 (BE), filter peak
         let b = PeqBand {
             index: 0,
-            freq_hz: 60,
-            gain_db: -12.0,
-            q: 4.0,
-            filter: FilterType::LowShelf,
+            freq_hz: 1000,
+            gain_db: -3.0,
+            q: 0.7,
+            filter: FilterType::Peak,
         };
         let p = b.to_payload();
-        // gain ×10 = -120 => 0xFF88
-        assert_eq!(&p[3..5], &(-120i16).to_be_bytes());
-        assert_eq!(&p[1..3], &400i16.to_be_bytes());
-        assert_eq!(p[7], 0x01);
+        assert_eq!(p[0], 0); // index
+        assert_eq!(&p[1..3], &(-30i16).to_be_bytes()); // gain first
+        assert_eq!(&p[3..5], &1000u16.to_be_bytes()); // then freq
+        assert_eq!(&p[5..7], &70i16.to_be_bytes()); // then Q
+        assert_eq!(p[7], 0); // peak
     }
 
     #[test]
@@ -331,33 +385,49 @@ mod tests {
     }
 
     #[test]
-    fn preset_state_mapping() {
-        assert_eq!(PresetState::from_byte(0), PresetState::Slot(0));
-        assert_eq!(PresetState::from_byte(3), PresetState::Slot(3));
+    fn preset_names_map_correctly() {
+        assert_eq!(PresetState::from_byte(0), PresetState::Vocal);
+        assert_eq!(PresetState::from_byte(3), PresetState::User1);
         assert_eq!(PresetState::from_byte(4), PresetState::Off);
         assert_eq!(PresetState::from_byte(9), PresetState::Raw(9));
-        assert_eq!(PresetState::Off.to_byte(), 4);
+        assert_eq!(PresetState::Bass.to_byte(), 2);
     }
 
     #[test]
-    fn preset_parse() {
+    fn preset_parse_names_and_numbers() {
+        assert_eq!(PresetState::parse("vocal"), Ok(PresetState::Vocal));
+        assert_eq!(PresetState::parse("USER1"), Ok(PresetState::User1));
         assert_eq!(PresetState::parse("off"), Ok(PresetState::Off));
-        assert_eq!(PresetState::parse("2"), Ok(PresetState::Slot(2)));
-        assert!(PresetState::parse("7").is_err());
+        assert_eq!(PresetState::parse("2"), Ok(PresetState::Bass));
         assert!(PresetState::parse("nope").is_err());
     }
 
     #[test]
-    fn gain_payload_round_trip() {
-        let p = gain_to_payload(6.0);
-        assert_eq!(gain_from_payload(&p).unwrap(), 6.0);
-        let p = gain_to_payload(-2.5);
-        assert_eq!(gain_from_payload(&p).unwrap(), -2.5);
+    fn gain_encoding_default_is_x2560_le() {
+        assert_eq!(GainEncoding::default(), GainEncoding::X2560Le);
+        let enc = GainEncoding::X2560Le;
+        // 6 dB × 2560 = 15360 = 0x3C00 → LE 0x00 0x3C
+        assert_eq!(enc.to_payload(6.0), vec![0x00, 0x3C]);
+        assert_eq!(enc.from_payload(&[0x00, 0x3C]).unwrap(), 6.0);
+    }
+
+    #[test]
+    fn gain_encoding_x10_be_round_trip() {
+        let enc = GainEncoding::X10Be;
+        assert_eq!(enc.to_payload(-2.5), vec![0xFF, 0xE7]); // -25 BE
+        assert_eq!(enc.from_payload(&[0xFF, 0xE7]).unwrap(), -2.5);
+    }
+
+    #[test]
+    fn gain_encoding_clamps_instead_of_panicking() {
+        // 100 dB × 2560 overflows i16; must clamp, not panic.
+        let p = GainEncoding::X2560Le.to_payload(100.0);
+        assert_eq!(p, i16::MAX.to_le_bytes().to_vec());
     }
 
     #[test]
     fn filter_type_parse() {
-        assert_eq!(FilterType::parse("peaking"), Ok(FilterType::Peaking));
+        assert_eq!(FilterType::parse("peak"), Ok(FilterType::Peak));
         assert_eq!(FilterType::parse("low_shelf"), Ok(FilterType::LowShelf));
         assert_eq!(FilterType::parse("HS"), Ok(FilterType::HighShelf));
         assert_eq!(FilterType::parse("7"), Ok(FilterType::Unknown(7)));

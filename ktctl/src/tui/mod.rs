@@ -92,7 +92,7 @@ impl App {
 
     fn adjust_gain(&mut self, delta: f32) {
         if let Some(b) = self.state.bands.get_mut(self.selected) {
-            b.gain_db = (b.gain_db + delta).clamp(-24.0, 24.0);
+            b.gain_db = (b.gain_db + delta).clamp(-12.0, 12.0);
             self.dirty = true;
             self.status = format!("band {} gain {:+.1} dB (unsaved)", b.index, b.gain_db);
         }
@@ -108,11 +108,14 @@ impl App {
     }
 
     fn cycle_preset(&mut self) {
+        // Cycle vocal → classic → bass → user1 → off → vocal.
         self.state.preset = match self.state.preset {
-            PresetState::Slot(n) if n < 3 => PresetState::Slot(n + 1),
-            PresetState::Slot(_) => PresetState::Off,
-            PresetState::Off => PresetState::Slot(0),
-            PresetState::Raw(_) => PresetState::Slot(0),
+            PresetState::Vocal => PresetState::Classic,
+            PresetState::Classic => PresetState::Bass,
+            PresetState::Bass => PresetState::User1,
+            PresetState::User1 => PresetState::Off,
+            PresetState::Off => PresetState::Vocal,
+            PresetState::Raw(_) => PresetState::Vocal,
         };
         self.dirty = true;
         self.status = format!("preset {} (unsaved)", self.state.preset);
@@ -236,7 +239,7 @@ fn render_chart(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            let height = ((b.gain_db + 24.0).round().max(0.0)) as u64;
+            let height = ((b.gain_db + 12.0).round().max(0.0)) as u64;
             let style = if i == app.selected {
                 Style::default().fg(Color::Cyan)
             } else {
@@ -254,7 +257,7 @@ fn render_chart(f: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" EQ curve (bar height = gain, +24 dB offset) "),
+                .title(" EQ curve (bar height = gain, +12 dB offset) "),
         )
         .data(BarGroup::default().bars(&bars))
         .bar_width(9)
@@ -305,16 +308,16 @@ mod tests {
             app.adjust_gain(0.5);
         }
         assert!(app.dirty);
-        assert!(app.state.bands[0].gain_db <= 24.0);
+        assert!(app.state.bands[0].gain_db <= 12.0);
     }
 
     #[test]
     fn preset_cycles_through_off() {
         let mut app = App::new(PeqState::flat());
-        app.state.preset = PresetState::Slot(3);
+        app.state.preset = PresetState::User1;
         app.cycle_preset();
         assert_eq!(app.state.preset, PresetState::Off);
         app.cycle_preset();
-        assert_eq!(app.state.preset, PresetState::Slot(0));
+        assert_eq!(app.state.preset, PresetState::Vocal);
     }
 }

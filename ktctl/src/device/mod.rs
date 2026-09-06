@@ -11,10 +11,14 @@ pub mod fake;
 pub mod usb;
 
 use crate::proto::frame::{Frame, FrameCodec, FrameError};
-use crate::proto::opcode::{CMD_GAIN, CMD_PEQ_PRESET};
-use crate::proto::peq::{
-    gain_from_payload, gain_to_payload, PeqBand, PeqError, PeqState, PresetState, BAND_COUNT,
+use crate::proto::opcode::{
+    CMD_FIRMWARE, CMD_GAIN, CMD_MIC_DETECT, CMD_PEQ_PRESET, CMD_SAMPLE_RATE, CMD_UAC_MODE,
+    CMD_VOLUME, SAVE_CANDIDATES,
 };
+use crate::proto::peq::{
+    GainEncoding, PeqBand, PeqError, PeqState, PresetState, BAND_COUNT,
+};
+use crate::proto::state::{firmware_version, sample_rate_label, DeviceState, UacMode};
 
 /// USB vendor id shared by the JA11 / KT02H20 family (from `ktflash`).
 pub const JA11_VID: u16 = 0x2972;
@@ -66,15 +70,23 @@ pub trait Transport {
 pub struct Device<T: Transport> {
     transport: T,
     codec: FrameCodec,
+    gain_encoding: GainEncoding,
 }
 
 impl<T: Transport> Device<T> {
-    /// Wrap a transport in the protocol layer.
+    /// Wrap a transport in the protocol layer (default gain encoding).
     pub fn new(transport: T) -> Self {
         Device {
             transport,
             codec: FrameCodec::new(),
+            gain_encoding: GainEncoding::default(),
         }
+    }
+
+    /// Override the master-gain (`0x17`) encoding (see [`GainEncoding`]).
+    pub fn with_gain_encoding(mut self, encoding: GainEncoding) -> Self {
+        self.gain_encoding = encoding;
+        self
     }
 
     /// Access the underlying transport (for `describe`, tests, etc.).
@@ -111,17 +123,17 @@ impl<T: Transport> Device<T> {
         Ok(())
     }
 
-    /// Read the global / makeup gain in dB.
+    /// Read the master / makeup gain in dB.
     pub fn get_gain(&mut self) -> Result<f32, DeviceError> {
         let seq = self.codec.next_seq();
         let reply = self.exchange(Frame::read(seq, CMD_GAIN, vec![]))?;
-        Ok(gain_from_payload(&reply.payload)?)
+        Ok(self.gain_encoding.from_payload(&reply.payload)?)
     }
 
-    /// Set the global / makeup gain in dB.
+    /// Set the master / makeup gain in dB.
     pub fn set_gain(&mut self, gain_db: f32) -> Result<(), DeviceError> {
         let seq = self.codec.next_seq();
-        let payload = gain_to_payload(gain_db).to_vec();
+        let payload = self.gain_encoding.to_payload(gain_db);
         self.exchange(Frame::write(seq, CMD_GAIN, payload))?;
         Ok(())
     }
@@ -153,6 +165,90 @@ impl<T: Transport> Device<T> {
             preset: self.get_preset()?,
         })
     }
+
+    // ── Device-state channel (Status screen, roadmap Phase 3 items 6-7) ──────
+
+    /// Read a single-byte value from a device-state opcode.
+    fn read_byte(&mut self, cmd: u8) -> Result<u8, DeviceError> {
+        let seq = self.codec.next_seq();
+        let reply = self.exchange(Frame::read(seq, cmd, vec![]))?;
+        Ok(reply.payload.first().copied().unwrap_or(0))
+    }
+
+    /// Read the device volume (raw device units).
+    pub fn get_volume(&mut self) -> Result<u8, DeviceError> {
+        self.read_byte(CMD_VOLUME)
+    }
+
+    /// Set the device volume (raw device units).
+    pub fn set_volume(&mut self, volume: u8) -> Result<(), DeviceError> {
+        let seq = self.codec.next_seq();
+        self.exchange(Frame::write(seq, CMD_VOLUME, vec![volume]))?;
+        Ok(())
+    }
+
+    /// Read the current sample-rate/format table index.
+    pub fn get_sample_rate_index(&mut self) -> Result<u8, DeviceError> {
+        self.read_byte(CMD_SAMPLE_RATE)
+    }
+
+    /// Read the firmware version string (e.g. `"1.4"`).
+    pub fn get_firmware(&mut self) -> Result<String, DeviceError> {
+        let seq = self.codec.next_seq();
+        let reply = self.exchange(Frame::read(seq, CMD_FIRMWARE, vec![]))?;
+        Ok(firmware_version(&reply.payload))
+    }
+
+    /// Read whether an in-line microphone is detected.
+    pub fn get_mic_present(&mut self) -> Result<bool, DeviceError> {
+        Ok(self.read_byte(CMD_MIC_DETECT)? != 0)
+    }
+
+    /// Read the current UAC mode.
+    pub fn get_uac(&mut self) -> Result<UacMode, DeviceError> {
+        Ok(UacMode::from_byte(self.read_byte(CMD_UAC_MODE)?))
+    }
+
+    /// Set the UAC mode (`0x20`, read+write).
+    pub fn set_uac(&mut self, mode: UacMode) -> Result<(), DeviceError> {
+        let seq = self.codec.next_seq();
+        self.exchange(Frame::write(seq, CMD_UAC_MODE, vec![mode.to_byte()]))?;
+        Ok(())
+    }
+
+    /// Read the full device-state (Status screen) snapshot.
+    pub fn get_device_state(&mut self) -> Result<DeviceState, DeviceError> {
+        let volume = self.get_volume()?;
+        let sample_rate_index = self.get_sample_rate_index()?;
+        let firmware = self.get_firmware()?;
+        let mic_present = self.get_mic_present()?;
+        let uac = self.get_uac()?;
+        Ok(DeviceState {
+            volume,
+            sample_rate_index,
+            sample_rate: sample_rate_label(sample_rate_index).to_string(),
+            firmware,
+            mic_present,
+            uac,
+        })
+    }
+
+    /// Attempt to commit PEQ edits to persistent storage.
+    ///
+    /// The save opcode is unresolved (see [`SAVE_CANDIDATES`]); this tries each
+    /// candidate in order and returns the `(cmd, payload)` that first succeeded.
+    /// It's a best-effort convenience — hardware must confirm which is real.
+    pub fn save(&mut self) -> Result<(u8, Vec<u8>), DeviceError> {
+        let mut last_err = None;
+        for (cmd, payload) in SAVE_CANDIDATES {
+            let seq = self.codec.next_seq();
+            match self.exchange(Frame::write(seq, *cmd, payload.to_vec())) {
+                Ok(_) => return Ok((*cmd, payload.to_vec())),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| DeviceError::Io("no save candidates".into())))
+    }
 }
 
 #[cfg(test)]
@@ -169,7 +265,7 @@ mod tests {
             freq_hz: 250,
             gain_db: 4.5,
             q: 1.4,
-            filter: FilterType::Peaking,
+            filter: FilterType::Peak,
         };
         dev.set_band(&band).unwrap();
         let got = dev.get_band(1).unwrap();
@@ -180,9 +276,9 @@ mod tests {
     fn round_trip_gain_and_preset() {
         let mut dev = Device::new(FakeDevice::new());
         dev.set_gain(-6.0).unwrap();
-        assert_eq!(dev.get_gain().unwrap(), -6.0);
-        dev.set_preset(PresetState::Slot(2)).unwrap();
-        assert_eq!(dev.get_preset().unwrap(), PresetState::Slot(2));
+        assert!((dev.get_gain().unwrap() - (-6.0)).abs() < 1e-3);
+        dev.set_preset(PresetState::Bass).unwrap();
+        assert_eq!(dev.get_preset().unwrap(), PresetState::Bass);
         dev.set_preset(PresetState::Off).unwrap();
         assert_eq!(dev.get_preset().unwrap(), PresetState::Off);
     }

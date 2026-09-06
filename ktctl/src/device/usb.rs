@@ -1,15 +1,15 @@
 //! Native USB transport via `rusb`/libusb (roadmap Phase 2).
 //!
-//! **Unvalidated against hardware.** The interface number and bulk IN/OUT
-//! endpoint addresses are open Phase 0 questions — the Android app resolves them
-//! at runtime from the claimed interface's descriptors rather than hardcoding
-//! them. This module therefore *auto-discovers* a vendor-class interface with a
-//! bulk IN + bulk OUT endpoint pair, and lets the operator override any of it
-//! via [`UsbConfig`] once a capture pins the real numbers down.
+//! **Unvalidated against hardware.** Interface/endpoint discovery *is* now
+//! resolved from static RE (Phase 0): the Android app scans for the first
+//! interface with `bInterfaceClass == 3` (HID) and exactly two endpoints, then
+//! picks OUT/IN by direction bit and force-claims it (detaching the kernel HID
+//! driver). This module ports that exact heuristic and still lets the operator
+//! override any of it via [`UsbConfig`] once a capture confirms the numbers.
 
 use std::time::Duration;
 
-use rusb::{Context, DeviceHandle, Direction as UsbDir, TransferType, UsbContext};
+use rusb::{Context, DeviceHandle, Direction as UsbDir, UsbContext};
 
 use super::{DeviceError, Transport, JA11_PID, JA11_VID};
 
@@ -156,9 +156,13 @@ impl Drop for UsbTransport {
     }
 }
 
-/// Walk the active configuration's interfaces to find a vendor-class interface
-/// (class `0xFF`) carrying a bulk IN + bulk OUT endpoint pair, honouring any
-/// explicit overrides in `config`.
+/// USB HID interface class code — the JA11's control interface, per Phase 0.
+const HID_CLASS: u8 = 0x03;
+
+/// Walk the active configuration's interfaces to find the one the Android app
+/// uses: `bInterfaceClass == 3` (HID) with exactly two endpoints, OUT/IN picked
+/// by direction bit. Honours any explicit overrides in `config`, and falls back
+/// to any two-endpoint interface if no HID one is present.
 fn resolve_endpoints(
     device: &rusb::Device<Context>,
     desc: &rusb::DeviceDescriptor,
@@ -169,7 +173,7 @@ fn resolve_endpoints(
         .map_err(|e| DeviceError::Io(format!("config descriptor: {e}")))?;
     let _ = desc;
 
-    let mut best: Option<(u8, u8, u8, bool)> = None; // (iface, out, in, is_vendor_class)
+    let mut best: Option<(u8, u8, u8, bool)> = None; // (iface, out, in, is_hid)
 
     for interface in config_desc.interfaces() {
         for iface_desc in interface.descriptors() {
@@ -178,13 +182,17 @@ fn resolve_endpoints(
                     continue;
                 }
             }
-            let is_vendor = iface_desc.class_code() == 0xFF;
+            let is_hid = iface_desc.class_code() == HID_CLASS;
+            // The app keys on exactly two endpoints; enforce that here too.
+            if iface_desc.num_endpoints() != 2 {
+                continue;
+            }
             let mut ep_out = None;
             let mut ep_in = None;
             for ep in iface_desc.endpoint_descriptors() {
-                if ep.transfer_type() != TransferType::Bulk {
-                    continue;
-                }
+                // Endpoints on HID interfaces are typically Interrupt, not Bulk;
+                // accept either and let direction decide (the app uses the raw
+                // endpoint regardless of declared transfer type).
                 match ep.direction() {
                     UsbDir::Out => ep_out = Some(ep.address()),
                     UsbDir::In => ep_in = Some(ep.address()),
@@ -196,14 +204,12 @@ fn resolve_endpoints(
                     iface,
                     config.ep_out.unwrap_or(o),
                     config.ep_in.unwrap_or(i),
-                    is_vendor,
+                    is_hid,
                 );
-                // Prefer a vendor-class interface; otherwise take the first fit.
+                // Prefer a HID-class interface; otherwise keep the first fit.
                 match &best {
                     None => best = Some(candidate),
-                    Some((_, _, _, prev_vendor)) if is_vendor && !prev_vendor => {
-                        best = Some(candidate)
-                    }
+                    Some((_, _, _, prev_hid)) if is_hid && !prev_hid => best = Some(candidate),
                     _ => {}
                 }
             }
@@ -213,7 +219,7 @@ fn resolve_endpoints(
     match best {
         Some((iface, o, i, _)) => Ok((iface, o, i)),
         None => Err(DeviceError::Io(
-            "no bulk IN/OUT endpoint pair found on any interface".to_string(),
+            "no HID-class (or 2-endpoint) interface found to claim".to_string(),
         )),
     }
 }

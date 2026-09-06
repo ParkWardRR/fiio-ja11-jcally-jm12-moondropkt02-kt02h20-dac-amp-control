@@ -13,6 +13,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::device::fake::FakeDevice;
 use crate::device::{Device, Transport};
 use crate::proto::peq::{FilterType, PeqBand, PresetState, BAND_COUNT};
+use crate::proto::state::UacMode;
 
 /// Runtime control for the FiiO JA11 and KT02H20-based dongles.
 #[derive(Debug, Parser)]
@@ -43,16 +44,23 @@ pub enum Command {
     /// Read / write the parametric EQ.
     #[command(subcommand)]
     Peq(PeqCommand),
-    /// Switch the active preset slot or disable PEQ (`0`-`3` or `off`).
+    /// Switch the active preset or disable PEQ.
     Preset {
-        /// Preset slot 0-3, or `off`.
+        /// `vocal`/`classic`/`bass`/`user1`/`off`, or `0`-`4`.
         value: String,
     },
-    /// Set the global / makeup gain in dB.
+    /// Set the master / makeup gain in dB.
     Gain {
         /// Gain in dB (e.g. `-3.0`).
         #[arg(allow_hyphen_values = true)]
         db: f32,
+    },
+    /// Read the device Status screen (volume, sample rate, firmware, mic, UAC).
+    State,
+    /// Switch USB Audio Class mode.
+    Uac {
+        /// `1` or `2`.
+        mode: String,
     },
 }
 
@@ -63,6 +71,8 @@ pub enum PeqCommand {
     Get,
     /// Write a single band.
     Set(SetBandArgs),
+    /// Commit PEQ edits to the device's persistent storage (opcode unconfirmed).
+    Save,
 }
 
 /// Arguments for `ktctl peq set`.
@@ -79,21 +89,25 @@ pub struct SetBandArgs {
     /// Quality factor Q.
     #[arg(long, allow_hyphen_values = true)]
     pub q: Option<f32>,
-    /// Filter type (`peaking`, `low-shelf`, `high-shelf`, or a raw integer).
+    /// Filter type (`peak`, `low-shelf`, `high-shelf`, or a raw integer).
     #[arg(long = "type")]
     pub filter: Option<String>,
 }
 
-/// Conservative client-side validation ranges (roadmap Phase 3 item 6). The
-/// device's true limits are unknown until hardware validation; these just stop
-/// obviously-nonsense values before they hit the wire.
+/// Conservative client-side validation ranges (roadmap Phase 3 item 9). The
+/// device's true limits are unconfirmed; these match what FIIO's EQ-screen
+/// screenshots imply (±12 dB) and stop obviously-nonsense values before they
+/// hit the wire.
 mod limits {
     /// Minimum accepted frequency in Hz.
     pub const FREQ_MIN: u16 = 20;
     /// Maximum accepted frequency in Hz.
     pub const FREQ_MAX: u16 = 20_000;
-    /// Gain bound (±) in dB.
-    pub const GAIN_ABS_MAX: f32 = 24.0;
+    /// Per-band gain bound (±) in dB (screenshots show a ±12 dB range).
+    pub const GAIN_ABS_MAX: f32 = 12.0;
+    /// Master-gain bound (±) in dB. Under the likely `×2560` i16 encoding, the
+    /// hard wire limit is ~±12.79 dB; ±12 keeps a margin.
+    pub const MASTER_GAIN_ABS_MAX: f32 = 12.0;
     /// Minimum Q.
     pub const Q_MIN: f32 = 0.1;
     /// Maximum Q.
@@ -132,10 +146,10 @@ fn validate_band(b: &PeqBand) -> Result<()> {
 
 fn validate_gain(db: f32) -> Result<()> {
     anyhow::ensure!(
-        db.abs() <= limits::GAIN_ABS_MAX,
+        db.abs() <= limits::MASTER_GAIN_ABS_MAX,
         "gain {} dB out of range (±{} dB)",
         db,
-        limits::GAIN_ABS_MAX
+        limits::MASTER_GAIN_ABS_MAX
     );
     Ok(())
 }
@@ -178,7 +192,11 @@ fn run_command<T: Transport>(cmd: &Command, cli: &Cli, mut dev: Device<T>) -> Re
     match cmd {
         Command::Probe => {
             println!("device: {}", dev.transport().describe());
-            // Best-effort read to prove the channel works.
+            // Best-effort reads to prove the channel works.
+            match dev.get_firmware() {
+                Ok(v) => println!("firmware: {v}"),
+                Err(e) => println!("firmware: <unreadable: {e}>"),
+            }
             match dev.get_preset() {
                 Ok(p) => println!("preset: {p}"),
                 Err(e) => println!("preset: <unreadable: {e}>"),
@@ -221,6 +239,13 @@ fn run_command<T: Transport>(cmd: &Command, cli: &Cli, mut dev: Device<T>) -> Re
             }
             Ok(())
         }
+        Command::Peq(PeqCommand::Save) => {
+            let (cmd_byte, payload) = dev.save().context("saving PEQ to device")?;
+            println!(
+                "save issued via cmd {cmd_byte:#04x} payload {payload:02x?} (opcode unconfirmed)"
+            );
+            Ok(())
+        }
         Command::Preset { value } => {
             let preset = PresetState::parse(value).map_err(|e| anyhow::anyhow!(e))?;
             dev.set_preset(preset).context("setting preset")?;
@@ -231,6 +256,21 @@ fn run_command<T: Transport>(cmd: &Command, cli: &Cli, mut dev: Device<T>) -> Re
             validate_gain(*db)?;
             dev.set_gain(*db).context("setting gain")?;
             println!("gain set to {db:+.1} dB");
+            Ok(())
+        }
+        Command::State => {
+            let state = dev.get_device_state().context("reading device state")?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&state)?);
+            } else {
+                render::print_device_state(&state);
+            }
+            Ok(())
+        }
+        Command::Uac { mode } => {
+            let mode = UacMode::parse(mode).map_err(|e| anyhow::anyhow!(e))?;
+            dev.set_uac(mode).context("setting UAC mode")?;
+            println!("UAC mode set to {mode}");
             Ok(())
         }
     }

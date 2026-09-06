@@ -9,12 +9,12 @@
 //! the encoder against accidental regressions; they are NOT proof the protocol
 //! is correct — that requires hardware. See `docs/PROTOCOL.md`.
 
-use ktctl::device::{Device, Transport};
 use ktctl::device::fake::FakeDevice;
+use ktctl::device::{Device, Transport};
 use ktctl::proto::crc::crc8_maxim;
 use ktctl::proto::frame::{Frame, FrameCodec};
 use ktctl::proto::opcode::CMD_PEQ_BAND;
-use ktctl::proto::peq::{FilterType, PeqBand, PresetState};
+use ktctl::proto::peq::{FilterType, GainEncoding, PeqBand, PresetState};
 
 #[test]
 fn write_band_frame_is_well_formed() {
@@ -24,7 +24,7 @@ fn write_band_frame_is_well_formed() {
         freq_hz: 1000,
         gain_db: -3.0,
         q: 0.7,
-        filter: FilterType::Peaking,
+        filter: FilterType::Peak,
     };
     let frame = band.to_write_frame(0x0001);
     let bytes = codec.encode(&frame);
@@ -38,13 +38,13 @@ fn write_band_frame_is_well_formed() {
     assert_eq!(bytes[6], 8, "payload len");
     assert_eq!(*bytes.last().unwrap(), 0xEE, "term");
 
-    // Payload: index, Q×100 (70), gain×10 (-30), freq (1000), filter (0).
+    // Payload (corrected order): index, gain×10 (-30), freq (1000), Q×100 (70), filter (0).
     let payload = &bytes[7..15];
     assert_eq!(payload[0], 0x00); // index
-    assert_eq!(&payload[1..3], &70i16.to_be_bytes()); // Q ×100
-    assert_eq!(&payload[3..5], &(-30i16).to_be_bytes()); // gain ×10
-    assert_eq!(&payload[5..7], &1000u16.to_be_bytes()); // freq
-    assert_eq!(payload[7], 0x00); // peaking
+    assert_eq!(&payload[1..3], &(-30i16).to_be_bytes()); // gain ×10, first
+    assert_eq!(&payload[3..5], &1000u16.to_be_bytes()); // freq, second
+    assert_eq!(&payload[5..7], &70i16.to_be_bytes()); // Q ×100, third
+    assert_eq!(payload[7], 0x00); // peak
 
     // CRC covers bytes[1..15] (magic through payload).
     let expected_crc = crc8_maxim(&bytes[1..15]);
@@ -72,7 +72,7 @@ fn fake_device_full_state_roundtrip() {
     let mut dev = Device::new(FakeDevice::new());
 
     dev.set_gain(-4.5).unwrap();
-    dev.set_preset(PresetState::Slot(2)).unwrap();
+    dev.set_preset(PresetState::Bass).unwrap();
     let band = PeqBand {
         index: 4,
         freq_hz: 8000,
@@ -83,10 +83,19 @@ fn fake_device_full_state_roundtrip() {
     dev.set_band(&band).unwrap();
 
     let state = dev.get_state().unwrap();
-    assert_eq!(state.gain_db, -4.5);
-    assert_eq!(state.preset, PresetState::Slot(2));
+    assert!((state.gain_db - (-4.5)).abs() < 1e-3);
+    assert_eq!(state.preset, PresetState::Bass);
     assert_eq!(state.bands[4], band);
     assert_eq!(state.bands.len(), 5);
+}
+
+#[test]
+fn master_gain_default_encoding_is_x2560_le() {
+    // Default GainEncoding must be the two-driver-agreed ×2560 little-endian.
+    assert_eq!(GainEncoding::default(), GainEncoding::X2560Le);
+    let mut dev = Device::new(FakeDevice::new());
+    dev.set_gain(-6.0).unwrap();
+    assert!((dev.get_gain().unwrap() - (-6.0)).abs() < 1e-3);
 }
 
 #[test]
