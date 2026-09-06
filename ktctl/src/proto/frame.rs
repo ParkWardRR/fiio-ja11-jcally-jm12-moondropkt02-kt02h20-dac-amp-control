@@ -239,6 +239,39 @@ impl FrameCodec {
             payload,
         })
     }
+
+    /// Scan `buf` for the first structurally-valid, CRC-passing frame and return
+    /// it along with the total number of bytes consumed up to and including its
+    /// terminator.
+    ///
+    /// Unlike [`FrameCodec::decode`], which requires `buf` to be *exactly* one
+    /// frame, this tolerates leading garbage and trailing bytes — useful for a
+    /// real transport where a bulk IN read may return partial noise or several
+    /// batched replies. Returns `None` if no complete valid frame is present
+    /// yet (caller should read more bytes and retry).
+    pub fn find_and_decode(&self, buf: &[u8]) -> Option<(Frame, usize)> {
+        let mut start = 0;
+        while start + MIN_FRAME_LEN <= buf.len() {
+            // Anchor on a lead byte.
+            if buf[start] != LEAD {
+                start += 1;
+                continue;
+            }
+            let declared = buf[start + 6] as usize;
+            let total = MIN_FRAME_LEN + declared;
+            if start + total <= buf.len() {
+                let candidate = &buf[start..start + total];
+                if let Ok(frame) = self.decode(candidate) {
+                    return Some((frame, start + total));
+                }
+            }
+            // Either this lead byte is spurious (bad length/CRC) or the frame is
+            // genuinely incomplete — in both cases slide forward and keep looking.
+            // If nothing validates, we fall through to `None` (caller reads more).
+            start += 1;
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -315,5 +348,38 @@ mod tests {
     fn too_short_rejected() {
         let codec = FrameCodec::new();
         assert_eq!(codec.decode(&[0x02, 0xAA]), Err(FrameError::TooShort(2)));
+    }
+
+    #[test]
+    fn find_and_decode_skips_leading_garbage() {
+        let codec = FrameCodec::new();
+        let frame = Frame::write(0x0042, 0x15, vec![1, 2, 3]);
+        let good = codec.encode(&frame);
+        let mut buf = vec![0x00, 0xFF, 0x13]; // junk
+        buf.extend_from_slice(&good);
+        buf.extend_from_slice(&[0xAB, 0xCD]); // trailing junk
+        let (got, consumed) = codec.find_and_decode(&buf).unwrap();
+        assert_eq!(got, frame);
+        assert_eq!(consumed, 3 + good.len());
+    }
+
+    #[test]
+    fn find_and_decode_waits_for_incomplete() {
+        let codec = FrameCodec::new();
+        let good = codec.encode(&Frame::read(1, 0x16, vec![0]));
+        // Truncate mid-frame: no complete frame yet.
+        assert!(codec.find_and_decode(&good[..good.len() - 2]).is_none());
+    }
+
+    #[test]
+    fn find_and_decode_recovers_after_false_lead() {
+        let codec = FrameCodec::new();
+        let frame = Frame::write(7, 0x17, vec![0x00, 0x3C]);
+        let good = codec.encode(&frame);
+        // A stray 0x02 that isn't a real frame, then the real one.
+        let mut buf = vec![0x02, 0x02, 0x02];
+        buf.extend_from_slice(&good);
+        let (got, _) = codec.find_and_decode(&buf).unwrap();
+        assert_eq!(got, frame);
     }
 }

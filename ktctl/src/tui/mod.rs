@@ -9,7 +9,10 @@
 //! * `←`/`→` or `h`/`l` — select band
 //! * `↑`/`↓` or `k`/`j` — adjust selected band's gain (±0.5 dB)
 //! * `[`/`]` — adjust selected band's frequency
-//! * `p` — cycle preset slot
+//! * `,`/`.` — adjust selected band's Q
+//! * `t` — cycle the selected band's filter type
+//! * `p` — cycle preset (vocal/classic/bass/user1/off)
+//! * `r` — reload state from the device (discards unsaved edits)
 //! * `w` — write the current state to the device
 //! * `q` / `Esc` — quit
 
@@ -25,13 +28,15 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Bar, BarChart, BarGroup, Block, Borders, Paragraph};
+use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::device::fake::FakeDevice;
 use crate::device::{Device, Transport};
-use crate::proto::peq::{PeqState, PresetState};
+use crate::proto::peq::{FilterType, PeqState, PresetState};
+use crate::proto::response::sample_curve;
 
 /// Entry point used by the CLI when no subcommand is given.
 pub fn run(fake: bool) -> Result<()> {
@@ -107,6 +112,26 @@ impl App {
         }
     }
 
+    fn adjust_q(&mut self, delta: f32) {
+        if let Some(b) = self.state.bands.get_mut(self.selected) {
+            b.q = (b.q + delta).clamp(0.1, 20.0);
+            self.dirty = true;
+            self.status = format!("band {} Q {:.2} (unsaved)", b.index, b.q);
+        }
+    }
+
+    fn cycle_filter(&mut self) {
+        if let Some(b) = self.state.bands.get_mut(self.selected) {
+            b.filter = match b.filter {
+                FilterType::Peak => FilterType::LowShelf,
+                FilterType::LowShelf => FilterType::HighShelf,
+                FilterType::HighShelf | FilterType::Unknown(_) => FilterType::Peak,
+            };
+            self.dirty = true;
+            self.status = format!("band {} type {} (unsaved)", b.index, b.filter);
+        }
+    }
+
     fn cycle_preset(&mut self) {
         // Cycle vocal → classic → bass → user1 → off → vocal.
         self.state.preset = match self.state.preset {
@@ -171,8 +196,19 @@ fn event_loop<T: Transport>(
             KeyCode::Down | KeyCode::Char('j') => app.adjust_gain(-0.5),
             KeyCode::Char(']') => app.adjust_freq(1.1),
             KeyCode::Char('[') => app.adjust_freq(1.0 / 1.1),
+            KeyCode::Char('.') | KeyCode::Char('>') => app.adjust_q(0.1),
+            KeyCode::Char(',') | KeyCode::Char('<') => app.adjust_q(-0.1),
+            KeyCode::Char('t') => app.cycle_filter(),
             KeyCode::Char('p') => app.cycle_preset(),
-            KeyCode::Char('w') => match write_state(dev, app) {
+            KeyCode::Char('r') => match dev.get_state() {
+                Ok(s) => {
+                    app.state = s;
+                    app.dirty = false;
+                    app.status = "reloaded from device".into();
+                }
+                Err(e) => app.status = format!("reload failed: {e}"),
+            },
+            KeyCode::Char('w') => match write_state(dev, &app.state) {
                 Ok(()) => {
                     app.dirty = false;
                     app.status = "saved to device".into();
@@ -185,12 +221,12 @@ fn event_loop<T: Transport>(
     Ok(())
 }
 
-fn write_state<T: Transport>(dev: &mut Device<T>, app: &App) -> Result<()> {
-    for b in &app.state.bands {
+fn write_state<T: Transport>(dev: &mut Device<T>, state: &PeqState) -> Result<()> {
+    for b in &state.bands {
         dev.set_band(b)?;
     }
-    dev.set_gain(app.state.gain_db)?;
-    dev.set_preset(app.state.preset)?;
+    dev.set_gain(state.gain_db)?;
+    dev.set_preset(state.preset)?;
     Ok(())
 }
 
@@ -232,42 +268,78 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_chart(f: &mut Frame, area: Rect, app: &App) {
-    // Bar heights are gain shifted into a non-negative range for display.
-    let bars: Vec<Bar> = app
+    // Real magnitude response over a log-frequency grid. X is the grid index
+    // (0..N) so the curve reads left→low, right→high; Y is dB.
+    const POINTS: usize = 120;
+    let curve = sample_curve(&app.state, POINTS);
+    let data: Vec<(f64, f64)> = curve
+        .iter()
+        .enumerate()
+        .map(|(i, &(_, db))| (i as f64, db))
+        .collect();
+
+    // Markers for each band's centre frequency, so you can see where they sit.
+    let band_marks: Vec<(f64, f64)> = app
         .state
         .bands
         .iter()
-        .enumerate()
-        .map(|(i, b)| {
-            let height = ((b.gain_db + 12.0).round().max(0.0)) as u64;
-            let style = if i == app.selected {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default().fg(Color::Blue)
-            };
-            Bar::default()
-                .value(height)
-                .label(Line::from(fmt_hz(b.freq_hz)))
-                .text_value(format!("{:+.1}", b.gain_db))
-                .style(style)
+        .map(|b| {
+            let idx = freq_to_grid_index(b.freq_hz, POINTS);
+            (idx as f64, curve[idx].1)
         })
         .collect();
 
-    let chart = BarChart::default()
+    let datasets = vec![
+        Dataset::default()
+            .name("response")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Cyan))
+            .data(&data),
+        Dataset::default()
+            .name("bands")
+            .marker(symbols::Marker::Dot)
+            .graph_type(GraphType::Scatter)
+            .style(Style::default().fg(Color::Yellow))
+            .data(&band_marks),
+    ];
+
+    let chart = Chart::new(datasets)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" EQ curve (bar height = gain, +12 dB offset) "),
+                .title(" EQ response (dB vs log-frequency) "),
         )
-        .data(BarGroup::default().bars(&bars))
-        .bar_width(9)
-        .bar_gap(2);
+        .x_axis(
+            Axis::default()
+                .title("20 Hz → 20 kHz")
+                .style(Style::default().fg(Color::DarkGray))
+                .bounds([0.0, (POINTS - 1) as f64]),
+        )
+        .y_axis(
+            Axis::default()
+                .title("dB")
+                .style(Style::default().fg(Color::DarkGray))
+                .labels(["-12", "0", "+12"])
+                .bounds([-12.0, 12.0]),
+        );
     f.render_widget(chart, area);
+}
+
+/// Grid index (0..points) for a frequency on the log grid `sample_curve` uses.
+fn freq_to_grid_index(hz: u16, points: usize) -> usize {
+    use crate::proto::response::{GRID_MAX_HZ, GRID_MIN_HZ};
+    let f = (hz as f64).clamp(GRID_MIN_HZ, GRID_MAX_HZ);
+    let t = (f.log10() - GRID_MIN_HZ.log10()) / (GRID_MAX_HZ.log10() - GRID_MIN_HZ.log10());
+    (t * (points - 1) as f64)
+        .round()
+        .clamp(0.0, (points - 1) as f64) as usize
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let dirty = if app.dirty { " [unsaved]" } else { "" };
-    let help = "←/→ band · ↑/↓ gain · [/] freq · p preset · w write · q quit";
+    let help =
+        "←→ band · ↑↓ gain · [] freq · ,. Q · t type · p preset · r reload · w write · q quit";
     let text = Line::from(vec![
         Span::styled(app.status.clone(), Style::default().fg(Color::Yellow)),
         Span::raw(dirty),
@@ -278,14 +350,6 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(text).block(Block::default().borders(Borders::ALL)),
         area,
     );
-}
-
-fn fmt_hz(hz: u16) -> String {
-    if hz >= 1000 {
-        format!("{:.1}k", hz as f32 / 1000.0)
-    } else {
-        format!("{hz}")
-    }
 }
 
 #[cfg(test)]
@@ -319,5 +383,32 @@ mod tests {
         assert_eq!(app.state.preset, PresetState::Off);
         app.cycle_preset();
         assert_eq!(app.state.preset, PresetState::Vocal);
+    }
+
+    #[test]
+    fn q_adjust_clamps() {
+        let mut app = App::new(PeqState::flat());
+        for _ in 0..500 {
+            app.adjust_q(-0.1);
+        }
+        assert!(app.state.bands[0].q >= 0.1);
+    }
+
+    #[test]
+    fn filter_cycles_back_to_peak() {
+        let mut app = App::new(PeqState::flat());
+        assert_eq!(app.state.bands[0].filter, FilterType::Peak);
+        app.cycle_filter();
+        assert_eq!(app.state.bands[0].filter, FilterType::LowShelf);
+        app.cycle_filter();
+        assert_eq!(app.state.bands[0].filter, FilterType::HighShelf);
+        app.cycle_filter();
+        assert_eq!(app.state.bands[0].filter, FilterType::Peak);
+    }
+
+    #[test]
+    fn freq_to_grid_index_is_monotonic() {
+        assert!(freq_to_grid_index(20, 100) < freq_to_grid_index(1000, 100));
+        assert!(freq_to_grid_index(1000, 100) < freq_to_grid_index(20000, 100));
     }
 }

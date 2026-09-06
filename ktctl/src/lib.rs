@@ -20,7 +20,9 @@
 #![warn(missing_docs)]
 
 pub mod cli;
+pub mod config;
 pub mod device;
+pub mod preset;
 pub mod proto;
 pub mod tui;
 

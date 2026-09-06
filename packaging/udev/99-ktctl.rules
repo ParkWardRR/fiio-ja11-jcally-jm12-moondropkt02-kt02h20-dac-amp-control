@@ -1,0 +1,16 @@
+# udev rules granting non-root access to the FiiO JA11 runtime-control interface.
+#
+# Install:
+#   sudo cp packaging/udev/99-ktctl.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# The JA11 presents its control channel on an HID-class interface claimed
+# directly by ktctl (see docs/PROTOCOL.md). TAG+="uaccess" hands the device to
+# the logged-in seat's user; the 0666 fallback covers non-systemd setups.
+#
+# NOTE: the VID/PID below (2972:0102) is the confirmed FiiO JA11. Add lines for
+# KT02H20 clones once their IDs are confirmed (see ktctl/src/device/ids.rs).
+
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2972", ATTRS{idProduct}=="0102", MODE="0666", TAG+="uaccess"
+# hidraw node for the same device, in case a raw-HID path is ever used:
+KERNEL=="hidraw*", ATTRS{idVendor}=="2972", ATTRS{idProduct}=="0102", MODE="0666", TAG+="uaccess"

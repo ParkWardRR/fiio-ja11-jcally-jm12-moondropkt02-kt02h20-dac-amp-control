@@ -33,11 +33,11 @@ struct FakeStatus {
 impl Default for FakeStatus {
     fn default() -> Self {
         FakeStatus {
-            volume: 60,             // screenshot value
-            sample_rate_index: 7,   // "384k" in SAMPLE_RATE_TABLE
-            firmware: [1, 4],       // screenshot showed "1.4"
-            mic_present: true,      // screenshot showed mic ON
-            uac: 2,                 // screenshot showed UAC 2.0
+            volume: 60,           // screenshot value
+            sample_rate_index: 7, // "384k" in SAMPLE_RATE_TABLE
+            firmware: [1, 4],     // screenshot showed "1.4"
+            mic_present: true,    // screenshot showed mic ON
+            uac: 2,               // screenshot showed UAC 2.0
         }
     }
 }

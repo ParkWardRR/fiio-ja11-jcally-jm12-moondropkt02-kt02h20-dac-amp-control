@@ -40,7 +40,12 @@ impl UacMode {
 
     /// Parse from a CLI string (`1`, `2`, `uac1`, `uac2`).
     pub fn parse(s: &str) -> Result<Self, String> {
-        match s.to_ascii_lowercase().replace("uac", "").replace('.', "").trim() {
+        match s
+            .to_ascii_lowercase()
+            .replace("uac", "")
+            .replace('.', "")
+            .trim()
+        {
             "1" | "10" => Ok(UacMode::Uac1),
             "2" | "20" => Ok(UacMode::Uac2),
             other => Err(format!("invalid UAC mode '{other}' (use 1 or 2)")),
@@ -64,8 +69,8 @@ impl std::fmt::Display for UacMode {
 /// by DSD rates, matching the "384k" value seen on FIIO's Status screenshot at
 /// some index. Hardware must confirm both the ordering and the count.
 pub const SAMPLE_RATE_TABLE: [&str; 15] = [
-    "44.1k", "48k", "88.2k", "96k", "176.4k", "192k", "352.8k", "384k", "705.6k", "768k",
-    "DSD64", "DSD128", "DSD256", "DSD512", "unknown",
+    "44.1k", "48k", "88.2k", "96k", "176.4k", "192k", "352.8k", "384k", "705.6k", "768k", "DSD64",
+    "DSD128", "DSD256", "DSD512", "unknown",
 ];
 
 /// Resolve a `0x09` table index to a human-readable label.

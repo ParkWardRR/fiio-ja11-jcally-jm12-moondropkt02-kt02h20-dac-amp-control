@@ -11,7 +11,52 @@ use std::time::Duration;
 
 use rusb::{Context, DeviceHandle, Direction as UsbDir, UsbContext};
 
+use super::ids::label;
 use super::{DeviceError, Transport, JA11_PID, JA11_VID};
+
+/// A device found on the bus during enumeration.
+#[derive(Debug, Clone)]
+pub struct FoundDevice {
+    /// USB vendor id.
+    pub vid: u16,
+    /// USB product id.
+    pub pid: u16,
+    /// USB bus number.
+    pub bus: u8,
+    /// USB device address.
+    pub address: u8,
+    /// Human-readable label from the known-device database.
+    pub label: String,
+}
+
+/// Enumerate all connected USB devices that match a known VID/PID.
+///
+/// With `only_known == true`, restricts to entries in the device database;
+/// otherwise reports every device (labelled "unknown" if not in the database).
+pub fn list_devices(only_known: bool) -> Result<Vec<FoundDevice>, DeviceError> {
+    let context = Context::new().map_err(|e| DeviceError::Io(e.to_string()))?;
+    let devices = context
+        .devices()
+        .map_err(|e| DeviceError::Io(e.to_string()))?;
+    let mut out = Vec::new();
+    for device in devices.iter() {
+        let Ok(desc) = device.device_descriptor() else {
+            continue;
+        };
+        let (vid, pid) = (desc.vendor_id(), desc.product_id());
+        if only_known && super::ids::identify(vid, pid).is_none() {
+            continue;
+        }
+        out.push(FoundDevice {
+            vid,
+            pid,
+            bus: device.bus_number(),
+            address: device.address(),
+            label: label(vid, pid),
+        });
+    }
+    Ok(out)
+}
 
 /// Tunable USB parameters. Defaults auto-discover; override once known.
 #[derive(Debug, Clone)]

@@ -11,7 +11,10 @@ pub fn print_device_state(s: &DeviceState) {
         s.sample_rate, s.sample_rate_index
     );
     println!("firmware:    {}", s.firmware);
-    println!("mic:         {}", if s.mic_present { "present" } else { "absent" });
+    println!(
+        "mic:         {}",
+        if s.mic_present { "present" } else { "absent" }
+    );
     println!("UAC mode:    {}", s.uac);
 }
 
@@ -40,55 +43,77 @@ pub fn print_band(b: &PeqBand) {
     );
 }
 
-/// A crude single-row ASCII sparkline of each band's gain, for a quick glance.
+/// Print the true magnitude-vs-frequency response as an ASCII plot, computed
+/// from the RBJ biquad model (including master gain) over a log-frequency grid.
 fn print_curve(state: &PeqState) {
-    const HEIGHT: i32 = 9; // rows; middle row is 0 dB
-    const SCALE: f32 = 12.0; // dB represented by half the height
-    let mid = HEIGHT / 2;
+    use crate::proto::response::{sample_curve, GRID_MAX_HZ, GRID_MIN_HZ};
 
-    // Column per band.
-    let cells: Vec<i32> = state
-        .bands
+    const WIDTH: usize = 60; // columns (log-freq)
+    const HEIGHT: usize = 13; // rows (dB), odd so 0 dB sits on a center row
+    const SCALE: f64 = 12.0; // dB at top/bottom edge
+
+    let curve = sample_curve(state, WIDTH);
+    let mid = (HEIGHT - 1) / 2;
+
+    // Map each column's dB to a row (0 = top).
+    let rows: Vec<usize> = curve
         .iter()
-        .map(|b| {
-            let norm = (b.gain_db / SCALE).clamp(-1.0, 1.0);
-            mid - (norm * mid as f32).round() as i32
+        .map(|&(_, db)| {
+            let norm = (db / SCALE).clamp(-1.0, 1.0); // -1..1
+            let r = mid as f64 - norm * mid as f64;
+            r.round().clamp(0.0, (HEIGHT - 1) as f64) as usize
         })
         .collect();
 
-    println!("  curve (±{SCALE:.0} dB):");
+    println!(
+        "  response (±{SCALE:.0} dB, {GRID_MIN_HZ:.0} Hz–{:.0} kHz):",
+        GRID_MAX_HZ / 1000.0
+    );
     for row in 0..HEIGHT {
         let mut line = String::from("   ");
-        for (i, &cell) in cells.iter().enumerate() {
-            if i > 0 {
-                line.push_str("   ");
-            }
-            line.push(if row == cell {
+        for &cell in &rows {
+            line.push(if cell == row {
                 '●'
             } else if row == mid {
-                '─'
+                '·'
             } else {
                 ' '
             });
         }
+        // dB scale label on the axis rows.
+        if row == 0 {
+            line.push_str(&format!("  +{SCALE:.0}"));
+        } else if row == mid {
+            line.push_str("   0");
+        } else if row == HEIGHT - 1 {
+            line.push_str(&format!("  -{SCALE:.0}"));
+        }
         println!("{line}");
     }
-    // Frequency axis labels.
-    let mut axis = String::from("   ");
-    for (i, b) in state.bands.iter().enumerate() {
-        if i > 0 {
-            axis.push_str("  ");
+
+    // Log-frequency axis ticks at decade-ish marks.
+    let mut axis = vec![b' '; WIDTH];
+    for (label, hz) in [
+        ("20", 20.0),
+        ("100", 100.0),
+        ("1k", 1000.0),
+        ("10k", 10_000.0),
+    ] {
+        let col = freq_to_col(hz, WIDTH);
+        for (k, ch) in label.bytes().enumerate() {
+            if col + k < WIDTH {
+                axis[col + k] = ch;
+            }
         }
-        axis.push_str(&format!("{:>2}", short_hz(b.freq_hz)));
     }
-    println!("{axis}");
+    println!("   {}", String::from_utf8_lossy(&axis));
 }
 
-/// Compact frequency label, e.g. 1000 → "1k".
-fn short_hz(hz: u16) -> String {
-    if hz >= 1000 {
-        format!("{}k", hz / 1000)
-    } else {
-        format!("{hz}")
-    }
+/// Column index for a frequency on the log grid used by [`print_curve`].
+fn freq_to_col(hz: f64, width: usize) -> usize {
+    use crate::proto::response::{GRID_MAX_HZ, GRID_MIN_HZ};
+    let t = (hz.log10() - GRID_MIN_HZ.log10()) / (GRID_MAX_HZ.log10() - GRID_MIN_HZ.log10());
+    (t * (width - 1) as f64)
+        .round()
+        .clamp(0.0, (width - 1) as f64) as usize
 }

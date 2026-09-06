@@ -16,13 +16,18 @@ categories = ["command-line-utilities", "hardware-support"]
 [features]
 default = ["usb"]
 usb = ["dep:rusb"]
+# Statically compile libusb from source (for dependency-free release binaries,
+# e.g. via cargo-zigbuild). Implies `usb`.
+vendored = ["usb", "rusb/vendored"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
 anyhow = "1.0"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 rusb = { version = "0.9", optional = true }
 ratatui = "0.28"
 crossterm = "0.28"

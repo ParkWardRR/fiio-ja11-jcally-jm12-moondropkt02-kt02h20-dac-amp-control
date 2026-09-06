@@ -281,11 +281,15 @@ impl GainEncoding {
     pub fn to_payload(self, gain_db: f32) -> Vec<u8> {
         match self {
             GainEncoding::X2560Le => {
-                let v = (gain_db * 2560.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                let v = (gain_db * 2560.0)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
                 v.to_le_bytes().to_vec()
             }
             GainEncoding::X10Be => {
-                let v = (gain_db * 10.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                let v = (gain_db * 10.0)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
                 v.to_be_bytes().to_vec()
             }
         }

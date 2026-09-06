@@ -6,6 +6,7 @@
 //! and [`usb::UsbTransport`] (behind the `usb` feature).
 
 pub mod fake;
+pub mod ids;
 
 #[cfg(feature = "usb")]
 pub mod usb;
@@ -15,9 +16,7 @@ use crate::proto::opcode::{
     CMD_FIRMWARE, CMD_GAIN, CMD_MIC_DETECT, CMD_PEQ_PRESET, CMD_SAMPLE_RATE, CMD_UAC_MODE,
     CMD_VOLUME, SAVE_CANDIDATES,
 };
-use crate::proto::peq::{
-    GainEncoding, PeqBand, PeqError, PeqState, PresetState, BAND_COUNT,
-};
+use crate::proto::peq::{GainEncoding, PeqBand, PeqError, PeqState, PresetState, BAND_COUNT};
 use crate::proto::state::{firmware_version, sample_rate_label, DeviceState, UacMode};
 
 /// USB vendor id shared by the JA11 / KT02H20 family (from `ktflash`).

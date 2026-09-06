@@ -10,9 +10,11 @@ mod render;
 use anyhow::{Context as _, Result};
 use clap::{Args, Parser, Subcommand};
 
+use crate::config::Config;
 use crate::device::fake::FakeDevice;
 use crate::device::{Device, Transport};
-use crate::proto::peq::{FilterType, PeqBand, PresetState, BAND_COUNT};
+use crate::preset;
+use crate::proto::peq::{FilterType, GainEncoding, PeqBand, PeqState, PresetState, BAND_COUNT};
 use crate::proto::state::UacMode;
 
 /// Runtime control for the FiiO JA11 and KT02H20-based dongles.
@@ -30,6 +32,10 @@ pub struct Cli {
     /// Print the raw frames sent/received.
     #[arg(short, long, global = true)]
     pub verbose: bool,
+
+    /// Override the master-gain (0x17) encoding: `x2560-le` (default) or `x10-be`.
+    #[arg(long, global = true, value_name = "ENCODING")]
+    pub gain_encoding: Option<String>,
 
     /// Subcommand to run; when omitted, the interactive TUI launches.
     #[command(subcommand)]
@@ -62,6 +68,22 @@ pub enum Command {
         /// `1` or `2`.
         mode: String,
     },
+    /// Set the device volume (raw device units).
+    Volume {
+        /// Volume value.
+        level: u8,
+    },
+    /// List connected JA11 / KT02H20-family USB devices.
+    List {
+        /// Include non-matching USB devices too.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Generate a shell completion script (`bash`/`zsh`/`fish`/`powershell`/`elvish`).
+    Completions {
+        /// Target shell.
+        shell: clap_complete::Shell,
+    },
 }
 
 /// `ktctl peq …` subcommands.
@@ -73,6 +95,19 @@ pub enum PeqCommand {
     Set(SetBandArgs),
     /// Commit PEQ edits to the device's persistent storage (opcode unconfirmed).
     Save,
+    /// Export the current PEQ to a file (`.json` = ktctl JSON, else AutoEQ text).
+    Export {
+        /// Output file path (`-` for stdout).
+        file: String,
+    },
+    /// Import a PEQ from a file (ktctl JSON or AutoEQ text) and write it.
+    Import {
+        /// Input file path.
+        file: String,
+        /// Also persist to the device after writing (runs `peq save`).
+        #[arg(long)]
+        save: bool,
+    },
 }
 
 /// Arguments for `ktctl peq set`.
@@ -160,28 +195,105 @@ pub fn run() -> Result<()> {
     dispatch(cli)
 }
 
+/// Resolve the effective gain encoding: CLI flag wins, else config file.
+fn resolve_gain_encoding(cli: &Cli, cfg: &Config) -> Result<GainEncoding> {
+    match cli.gain_encoding.as_deref() {
+        None => Ok(cfg.gain_encoding()),
+        Some(s) => match s.to_ascii_lowercase().replace('_', "-").as_str() {
+            "x2560-le" | "x2560le" | "2560" => Ok(GainEncoding::X2560Le),
+            "x10-be" | "x10be" | "10" => Ok(GainEncoding::X10Be),
+            other => anyhow::bail!("unknown gain encoding '{other}' (x2560-le or x10-be)"),
+        },
+    }
+}
+
 /// Run against an explicitly-provided CLI (used by tests).
 pub fn dispatch(mut cli: Cli) -> Result<()> {
+    let cfg = Config::load();
+
     // No subcommand → launch the TUI dashboard.
     let Some(command) = cli.command.take() else {
-        return crate::tui::run(cli.fake);
+        return crate::tui::run(cli.fake || cfg.default_fake);
     };
 
-    if cli.fake {
-        run_command(&command, &cli, Device::new(FakeDevice::new()))
+    // Commands that don't need a device open.
+    match &command {
+        Command::Completions { shell } => return run_completions(*shell),
+        Command::List { all } => return run_list(*all, &cli),
+        _ => {}
+    }
+
+    let encoding = resolve_gain_encoding(&cli, &cfg)?;
+
+    if cli.fake || cfg.default_fake {
+        run_command(
+            &command,
+            &cli,
+            Device::new(FakeDevice::new()).with_gain_encoding(encoding),
+        )
     } else {
         #[cfg(feature = "usb")]
         {
             use crate::device::usb::{UsbConfig, UsbTransport};
             let transport = UsbTransport::open(&UsbConfig::default())
                 .context("opening USB device (try --fake to run without hardware)")?;
-            run_command(&command, &cli, Device::new(transport))
+            run_command(
+                &command,
+                &cli,
+                Device::new(transport).with_gain_encoding(encoding),
+            )
         }
         #[cfg(not(feature = "usb"))]
         {
-            let _ = &command;
+            let _ = (&command, encoding);
             anyhow::bail!("built without the `usb` feature; re-run with --fake");
         }
+    }
+}
+
+/// Print a shell completion script to stdout.
+fn run_completions(shell: clap_complete::Shell) -> Result<()> {
+    let mut cmd = <Cli as clap::CommandFactory>::command();
+    clap_complete::generate(shell, &mut cmd, "ktctl", &mut std::io::stdout());
+    Ok(())
+}
+
+/// List connected devices (needs the usb feature; helpful message otherwise).
+fn run_list(all: bool, cli: &Cli) -> Result<()> {
+    #[cfg(feature = "usb")]
+    {
+        let devices = crate::device::usb::list_devices(!all).context("enumerating USB devices")?;
+        if cli.json {
+            // FoundDevice isn't Serialize; build a small JSON view.
+            let items: Vec<_> = devices
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "vid": format!("{:#06x}", d.vid),
+                        "pid": format!("{:#06x}", d.pid),
+                        "bus": d.bus,
+                        "address": d.address,
+                        "label": d.label,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&items)?);
+        } else if devices.is_empty() {
+            println!("no matching devices found");
+        } else {
+            for d in devices {
+                println!(
+                    "{:#06x}:{:#06x}  bus {} addr {}  {}",
+                    d.vid, d.pid, d.bus, d.address, d.label
+                );
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(feature = "usb"))]
+    {
+        let _ = (all, cli);
+        anyhow::bail!("built without the `usb` feature; device enumeration unavailable");
     }
 }
 
@@ -273,7 +385,64 @@ fn run_command<T: Transport>(cmd: &Command, cli: &Cli, mut dev: Device<T>) -> Re
             println!("UAC mode set to {mode}");
             Ok(())
         }
+        Command::Volume { level } => {
+            dev.set_volume(*level).context("setting volume")?;
+            println!("volume set to {level}");
+            Ok(())
+        }
+        Command::Peq(PeqCommand::Export { file }) => {
+            let state = dev.get_state().context("reading PEQ state to export")?;
+            let text = preset::export_by_extension(&state, file)
+                .map_err(|e| anyhow::anyhow!(e))
+                .context("serializing preset")?;
+            if file == "-" {
+                print!("{text}");
+            } else {
+                std::fs::write(file, &text).with_context(|| format!("writing {file}"))?;
+                eprintln!("exported {} bands to {file}", state.bands.len());
+            }
+            Ok(())
+        }
+        Command::Peq(PeqCommand::Import { file, save }) => {
+            let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+            let state = preset::import_auto(&text, file)
+                .map_err(|e| anyhow::anyhow!(e))
+                .context("parsing preset")?;
+            write_state(&mut dev, &state)?;
+            println!("imported {} bands from {file}", state.bands.len());
+            if !cli.json {
+                render::print_state(&state);
+            }
+            if *save {
+                match dev.save() {
+                    Ok((c, p)) => println!("saved via cmd {c:#04x} payload {p:02x?}"),
+                    Err(e) => eprintln!("warning: save failed: {e}"),
+                }
+            }
+            Ok(())
+        }
+        // Handled before a device is opened (see `dispatch`); kept exhaustive.
+        Command::List { all } => run_list(*all, cli),
+        Command::Completions { shell } => run_completions(*shell),
     }
+}
+
+/// Write a full [`PeqState`] to the device: every band, gain, and preset.
+fn write_state<T: Transport>(dev: &mut Device<T>, state: &PeqState) -> Result<()> {
+    for band in &state.bands {
+        let mut b = *band;
+        // Ensure indices are sane before writing.
+        if (b.index as usize) >= BAND_COUNT {
+            b.index = 0;
+        }
+        validate_band(&b).with_context(|| format!("band {} out of range", b.index))?;
+        dev.set_band(&b)
+            .with_context(|| format!("writing band {}", b.index))?;
+    }
+    validate_gain(state.gain_db)?;
+    dev.set_gain(state.gain_db).context("writing gain")?;
+    dev.set_preset(state.preset).context("writing preset")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -286,7 +455,9 @@ mod tests {
 
     #[test]
     fn parses_peq_set() {
-        let c = cli(&["peq", "set", "0", "--freq", "1000", "--gain", "-3.0", "--q", "0.7"]);
+        let c = cli(&[
+            "peq", "set", "0", "--freq", "1000", "--gain", "-3.0", "--q", "0.7",
+        ]);
         match c.command {
             Some(Command::Peq(PeqCommand::Set(a))) => {
                 assert_eq!(a.band, 0);
